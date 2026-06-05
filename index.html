@@ -178,6 +178,7 @@ var APP = {
   timerActive:    false,
   timerRemaining: 60,
   timerInterval:  null,
+  timerEndTime:   null,
 
   // Check-in form state
   ciPain:         null,
@@ -189,8 +190,11 @@ var APP = {
   // Set true when workout is finished this session
   liftCompletedToday: false,
 
-  // Set true on set 3 to log reps but block progression
-  formHold: false,
+  // Set true on set 3 to confirm user is ready to progress weight
+  progressionReady: false,
+
+  // AudioContext created on first user gesture so it can play in-page
+  audioCtx: null,
 
   // Calendar
   calViewYear:     null,
@@ -499,10 +503,11 @@ async function runProgressionEngine(ex, setsData) {
   var floor = repFloor(goalReps);
   var ceiling = goalReps + 5;
 
-  // Any skipped set, or form hold on set 3 = don't advance, don't count as stall
+  // Any skipped set = don't advance, don't count as stall
   var hasSkip = setsData.some(function(s) { return s.skipped; });
-  var hasFormHold = setsData.some(function(s) { return s.formHold; });
-  if (hasSkip || hasFormHold) return;
+  if (hasSkip) return;
+  // User must confirm they're ready to progress before any weight advance
+  var progressionConfirmed = setsData.some(function(s) { return s.progressionReady; });
 
   // All reps must be actual (no nulls)
   var reps = setsData.map(function(s) { return s.reps; });
@@ -545,7 +550,7 @@ async function runProgressionEngine(ex, setsData) {
       patch.set1_weight = Math.min(s1w, deloadedTargets.target_s1);
       patch.consecutive_failures = 0;
     }
-  } else if (success) {
+  } else if (success && progressionConfirmed) {
     failures = 0;
     patch.consecutive_failures = 0;
 
@@ -874,13 +879,15 @@ function render() {
 
   if (APP.screen === 'rest' && APP.timerActive) {
     APP.timerInterval = setInterval(function() {
-      APP.timerRemaining--;
+      APP.timerRemaining = Math.max(0, Math.round((APP.timerEndTime - Date.now()) / 1000));
       var el = document.getElementById('tn');
       if (el) el.textContent = fmt(APP.timerRemaining);
       if (APP.timerRemaining <= 0) {
         clearInterval(APP.timerInterval);
         APP.timerInterval = null;
         APP.timerActive = false;
+        APP.timerEndTime = null;
+        cancelTimerNotification();
         playTimerDone();
         APP.pendingSet = APP.pendingSet + 1;
         APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
@@ -1594,8 +1601,16 @@ function rExerciseRow(ex, idx, total) {
 
   if (isDone) {
     html += '<i class="ti ti-circle-check" style="font-size:24px;color:var(--color-text-success);flex-shrink:0"></i>';
+  } else if (isActive && ex.is_optional) {
+    html += '<div style="display:flex;gap:6px;flex-shrink:0">'
+      + '<button onclick="event.stopPropagation();skipWholeExercise(' + idx + ',\'skipped\')" style="padding:10px 14px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-secondary);border:0.5px solid var(--color-border-md);font-size:14px">Skip</button>'
+      + '<button onclick="event.stopPropagation();goLogSet(0,' + idx + ')" style="padding:10px 18px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:14px;font-weight:500">Start</button>'
+      + '</div>';
   } else if (isActive) {
-    html += '<button onclick="event.stopPropagation();goLogSet(0,' + idx + ')" style="padding:10px 18px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:14px;font-weight:500;flex-shrink:0">Start</button>';
+    html += '<div style="display:flex;gap:6px;flex-shrink:0">'
+      + '<button onclick="event.stopPropagation();showSkipExerciseMenu(' + idx + ')" style="padding:10px 14px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-secondary);border:0.5px solid var(--color-border-md);font-size:14px">Skip…</button>'
+      + '<button onclick="event.stopPropagation();goLogSet(0,' + idx + ')" style="padding:10px 18px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:14px;font-weight:500">Start</button>'
+      + '</div>';
   }
 
   html += '</div>';
@@ -1673,10 +1688,15 @@ function rLogSet() {
     + '<button onclick="doLogSet()" id="lb" style="width:100%;padding:20px;background:var(--color-text);color:var(--color-bg);border:none;border-radius:var(--radius-lg);font-size:18px;font-weight:500;margin-bottom:10px">Done · ' + APP.pendingReps + ' reps</button>'
     + (setIdx < 2 ? '<p style="text-align:center;font-size:12px;color:var(--color-text-tertiary)">→ ' + restLabel + ' rest starts after</p>' : '')
     + (setIdx === 2 && !ex.is_optional && !ex.is_bodyweight
-      ? '<button onclick="toggleFormHold()" style="width:100%;padding:14px;border-radius:var(--radius-md);border:0.5px solid ' + (APP.formHold ? 'var(--color-text-warning)' : 'var(--color-border)') + ';background:' + (APP.formHold ? 'var(--color-bg-warning)' : 'transparent') + ';color:' + (APP.formHold ? 'var(--color-text-warning)' : 'var(--color-text-secondary)') + ';font-size:14px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px">'
-        + '<i class="ti ti-shield-pause" style="font-size:16px"></i>'
-        + (APP.formHold ? 'Hold progression — form needs more work' : 'Hold progression (form not ready)')
-        + '</button>'
+      ? (function() {
+          var hint = progressionHint(ex);
+          var confirmed = APP.progressionReady;
+          var label = confirmed ? 'Confirmed — ' + hint : (hint || 'Confirm progression');
+          return '<button onclick="toggleProgressionReady()" style="width:100%;padding:14px;border-radius:var(--radius-md);border:0.5px solid ' + (confirmed ? 'var(--color-text-success)' : 'var(--color-border)') + ';background:' + (confirmed ? 'var(--color-bg-success,#0d2b1a)' : 'transparent') + ';color:' + (confirmed ? 'var(--color-text-success)' : 'var(--color-text-secondary)') + ';font-size:14px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px">'
+            + '<i class="ti ti-' + (confirmed ? 'circle-check-filled' : 'circle-check') + '" style="font-size:16px"></i>'
+            + label
+            + '</button>';
+        })()
       : '')
     + '<button onclick="showSkipMenu()" style="width:100%;padding:12px;background:transparent;border:none;color:var(--color-text-secondary);font-size:14px;margin-top:8px">Skip this set…</button>'
     + '</div>';
@@ -1760,6 +1780,7 @@ async function saveCheckin() {
 }
 
 async function startWorkout() {
+  await requestNotificationPermission();
   if (!APP.sessionId) {
     try {
       await createSession(APP.planState.current_gym_day);
@@ -1773,7 +1794,7 @@ async function startWorkout() {
   APP.loggedReps = [null, null, null];
   APP.loggedSkipped = [false, false, false];
   APP.skipReasons   = [null, null, null];
-  APP.formHold      = false;
+  APP.progressionReady = false;
   APP.screen = 'workout';
   render();
 }
@@ -1813,7 +1834,9 @@ async function doLogSet() {
   if (setIdx < 2) {
     // Start rest timer
     APP.timerRemaining = setIdx === 0 ? (ex.rest_short_seconds || 60) : (ex.rest_long_seconds || 180);
+    APP.timerEndTime = Date.now() + APP.timerRemaining * 1000;
     APP.timerActive = true;
+    scheduleTimerNotification(APP.timerEndTime, 'Set ' + (setIdx + 2), ex.name);
     APP.screen = 'rest';
     render();
   } else {
@@ -1845,7 +1868,9 @@ async function doSkipSet(reason) {
 
   if (setIdx < 2) {
     APP.timerRemaining = setIdx === 0 ? (ex.rest_short_seconds || 60) : (ex.rest_long_seconds || 180);
+    APP.timerEndTime = Date.now() + APP.timerRemaining * 1000;
     APP.timerActive = true;
+    scheduleTimerNotification(APP.timerEndTime, 'Set ' + (setIdx + 2), ex.name);
     APP.screen = 'rest';
     render();
   } else {
@@ -1855,10 +1880,10 @@ async function doSkipSet(reason) {
 
 async function finishExercise(ex) {
   // Run progression engine (handles skips internally)
-  var formHold = APP.formHold;
-  APP.formHold = false;
+  var progressionReady = APP.progressionReady;
+  APP.progressionReady = false;
   var setsData = [0,1,2].map(function(i) {
-    return { reps: APP.loggedReps[i], skipped: APP.loggedSkipped[i], formHold: formHold && i === 2 };
+    return { reps: APP.loggedReps[i], skipped: APP.loggedSkipped[i], progressionReady: progressionReady && i === 2 };
   });
   await runProgressionEngine(ex, setsData);
 
@@ -1902,6 +1927,8 @@ async function finishSession() {
 
 function skipRest() {
   APP.timerActive = false;
+  APP.timerEndTime = null;
+  cancelTimerNotification();
   APP.screen = 'log_set';
   APP.pendingSet = APP.pendingSet + 1;
   APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
@@ -1928,8 +1955,52 @@ function closeSkipMenu() {
   if (el) el.remove();
 }
 
-function toggleFormHold() {
-  APP.formHold = !APP.formHold;
+function showSkipExerciseMenu(idx) {
+  var ex = APP.exercises[idx];
+  var overlay = document.createElement('div');
+  overlay.id = 'skip-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  overlay.innerHTML = '<div style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px">'
+    + '<p style="font-size:16px;font-weight:500;margin-bottom:4px">Skip ' + ex.name + '?</p>'
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:16px">All 3 sets will be logged as skipped</p>'
+    + '<button onclick="closeSkipMenu();skipWholeExercise(' + idx + ',\'niggle\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center"><i class="ti ti-alert-circle" style="color:var(--color-text-danger)"></i>Niggle / pain — protecting the joint</button>'
+    + '<button onclick="closeSkipMenu();skipWholeExercise(' + idx + ',\'travel_equipment\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center"><i class="ti ti-luggage" style="color:var(--color-text-secondary)"></i>Travel / no equipment</button>'
+    + '<button onclick="closeSkipMenu();skipWholeExercise(' + idx + ',\'other\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:16px;display:flex;gap:10px;align-items:center"><i class="ti ti-dots" style="color:var(--color-text-secondary)"></i>Other</button>'
+    + '<button onclick="closeSkipMenu()" style="width:100%;padding:14px;border:none;background:transparent;font-size:14px;color:var(--color-text-secondary)">Cancel</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeSkipMenu(); });
+}
+
+async function skipWholeExercise(idx, reason) {
+  APP.exIndex          = idx;
+  APP.setLogged        = [false, false, false];
+  APP.loggedReps       = [null, null, null];
+  APP.loggedSkipped    = [true, true, true];
+  APP.skipReasons      = [reason, reason, reason];
+  APP.progressionReady = false;
+
+  var ex = APP.exercises[idx];
+  var st = ex.state;
+
+  for (var i = 0; i < 3; i++) {
+    var weight = ex.is_bodyweight ? null : [st.set1_weight, st.set2_weight, st.set3_weight][i];
+    try {
+      await logSessionSet(ex.id, i + 1, weight, ex.goal_reps, null, ex.is_bodyweight, 'skipped', reason);
+    } catch(e) {
+      console.error('Skip exercise log error:', e);
+    }
+  }
+
+  if (reason === 'niggle') {
+    await markNiggleFlare();
+  }
+
+  await finishExercise(ex);
+}
+
+function toggleProgressionReady() {
+  APP.progressionReady = !APP.progressionReady;
   render();
 }
 
@@ -2078,9 +2149,22 @@ function calSelectDate(dateStr) {
 // UTILITIES
 // =============================================================
 
+function ensureAudioCtx() {
+  if (!APP.audioCtx) {
+    try {
+      APP.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch(e) { return null; }
+  }
+  if (APP.audioCtx.state === 'suspended') {
+    APP.audioCtx.resume();
+  }
+  return APP.audioCtx;
+}
+
 function playTimerDone() {
+  var ctx = ensureAudioCtx();
+  if (!ctx) return;
   try {
-    var ctx = new (window.AudioContext || window.webkitAudioContext)();
     // Three ascending beeps
     [0, 0.25, 0.5].forEach(function(delay, i) {
       var osc = ctx.createOscillator();
@@ -2094,14 +2178,82 @@ function playTimerDone() {
       osc.start(ctx.currentTime + delay);
       osc.stop(ctx.currentTime + delay + 0.2);
     });
-  } catch(e) {
-    // Audio not available — silently skip
-  }
+  } catch(e) {}
 }
+
+// Warm up AudioContext on first touch so it's ready when the timer fires
+document.addEventListener('touchstart', function warmAudio() {
+  ensureAudioCtx();
+  document.removeEventListener('touchstart', warmAudio);
+}, { once: true });
+
+// When app returns to foreground, recalculate timer from end timestamp
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState !== 'visible') return;
+  if (!APP.timerActive || !APP.timerEndTime) return;
+  APP.timerRemaining = Math.max(0, Math.round((APP.timerEndTime - Date.now()) / 1000));
+  // If timer already expired while in background, fire immediately
+  if (APP.timerRemaining <= 0) {
+    clearInterval(APP.timerInterval);
+    APP.timerInterval = null;
+    APP.timerActive = false;
+    APP.timerEndTime = null;
+    cancelTimerNotification();
+    playTimerDone();
+    APP.pendingSet = APP.pendingSet + 1;
+    APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
+    APP.screen = 'log_set';
+    render();
+  } else {
+    // Re-sync the display; render() will restart the interval
+    render();
+  }
+});
 
 function fmt(s) {
   var m = Math.floor(s / 60), r = s % 60;
   return m > 0 ? m + ':' + (r < 10 ? '0' : '') + r : s + 's';
+}
+
+// =============================================================
+// SERVICE WORKER + NOTIFICATIONS
+// =============================================================
+
+var SW_REG = null;
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(function(reg) {
+    SW_REG = reg;
+  }).catch(function(e) {
+    console.warn('SW registration failed:', e);
+  });
+}
+
+function swPost(msg) {
+  if (!SW_REG) return;
+  var sw = SW_REG.active || SW_REG.installing || SW_REG.waiting;
+  if (sw) sw.postMessage(msg);
+}
+
+async function requestNotificationPermission() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'default') {
+    await Notification.requestPermission();
+  }
+}
+
+function scheduleTimerNotification(endTime, nextSetLabel, exerciseName) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  swPost({
+    type: 'SCHEDULE_TIMER',
+    endTime: endTime,
+    title: 'Rest over — ' + exerciseName,
+    body: 'Time for ' + nextSetLabel
+  });
+}
+
+function cancelTimerNotification() {
+  swPost({ type: 'CANCEL_TIMER' });
 }
 
 // =============================================================
