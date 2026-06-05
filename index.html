@@ -148,6 +148,7 @@ var APP = {
   //  'workout'     — exercise list for the day
   //  'log_set'     — log a single set
   //  'rest'        — rest timer
+  //  'rehab'       — rehab exercise detail
   screen: 'today',
 
   // Loaded from DB on boot
@@ -181,21 +182,47 @@ var APP = {
   ciPain:         null,
   ciSwelling:     false,
 
-  // Today's date string YYYY-MM-DD
-  today: new Date().toISOString().slice(0, 10),
+  // Today's date string YYYY-MM-DD (refreshed on each loadBootData call)
+  today: localDateStr(),
 
   // Set true when workout is finished this session
   liftCompletedToday: false,
 
   // Set true on set 3 to log reps but block progression
-  formHold: false
+  formHold: false,
+
+  // Calendar
+  calViewYear:     null,
+  calViewMonth:    null,
+  calLogs:         [],
+  calSessions:     [],
+  calUpcoming:     [],
+  calLoading:      false,
+  calSelectedDate: null,
+
+  // Rehab screen
+  rehabSetsCompleted: [],   // array of booleans, length = number of sets
+  rehabTimerActive:   false,
+  rehabTimerRemaining: 45,
+  rehabActiveSet:     0,    // which set is being timed (0-indexed)
+  rehabWeight:        0     // loaded from localStorage per exercise
 };
 
 // =============================================================
 // SUPABASE DATA LAYER
 // =============================================================
 
+// Returns local date as YYYY-MM-DD (avoids toISOString() UTC skew)
+function localDateStr() {
+  var d = new Date();
+  return d.getFullYear() + '-'
+    + String(d.getMonth() + 1).padStart(2, '0') + '-'
+    + String(d.getDate()).padStart(2, '0');
+}
+
 async function loadBootData() {
+  // Refresh so midnight crossings pick up the new date without a reload
+  APP.today = localDateStr();
   try {
     var [stateRes, configRes, logRes] = await Promise.all([
       db.from('plan_state').select('*').single(),
@@ -296,6 +323,39 @@ async function saveDailyLog(painLevel, jointFullness) {
 async function refreshReadiness() {
   var { data } = await db.from('v_readiness').select('readiness').maybeSingle();
   APP.readiness = data ? data.readiness : null;
+}
+
+async function loadCalendarData(year, month) {
+  var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+  var lastDay = new Date(year, month + 1, 0).getDate();
+  var startStr = year + '-' + pad(month + 1) + '-01';
+  var endStr   = year + '-' + pad(month + 1) + '-' + pad(lastDay);
+
+  // Next 5 cursor days for the upcoming queue
+  var ps = APP.planState;
+  var currentDayNum = (ps.current_phase - 1) * 8 + ps.current_cycle_day;
+  var upcomingDayNums = [];
+  for (var i = 1; i <= 5; i++) {
+    upcomingDayNums.push(((currentDayNum - 1 + i) % 24) + 1);
+  }
+
+  var [logsRes, sessionsRes, upcomingRes] = await Promise.all([
+    db.from('daily_log').select('*').gte('log_date', startStr).lte('log_date', endStr),
+    db.from('sessions').select('id,gym_day,created_at,completed_at')
+      .gte('completed_at', startStr + 'T00:00:00')
+      .lte('completed_at', endStr + 'T23:59:59.999')
+      .not('completed_at', 'is', null),
+    db.from('cycle_plan').select('*').in('day_number', upcomingDayNums)
+  ]);
+
+  APP.calLogs     = logsRes.data     || [];
+  APP.calSessions = sessionsRes.data || [];
+
+  // Preserve insertion order matching upcomingDayNums
+  var allUpcoming = upcomingRes.data || [];
+  APP.calUpcoming = upcomingDayNums.map(function(dn) {
+    return allUpcoming.find(function(d) { return d.day_number === dn; });
+  }).filter(Boolean);
 }
 
 async function createSession(gymDay) {
@@ -622,6 +682,121 @@ async function markNiggleFlare() {
 }
 
 // =============================================================
+// REHAB EXERCISE DEFINITIONS
+// =============================================================
+var REHAB_EXERCISES = [
+  {
+    key: 'isometric',
+    match: function(s) { return s.indexOf('isometric') !== -1 || s.indexOf('45s') !== -1; },
+    type: 'timed',       // countdown timer per set
+    sets: 5,
+    duration: 45,        // seconds per set
+    label: '5 × 45 sec holds',
+    tips: [
+      'Loop a band around a fixed point (rack, post) at roughly shin height and step into it so the band sits across your shins. Walk out until there\'s solid tension. Feet hip-width, toes slightly out.',
+      'Sit back into the squat until thighs are parallel or just below — the band pulls your shins forward, which drives the knees out over the toes and lets you load the quad tendon more purely. Aim for 60–90° knee angle.',
+      'Drive knees out over the 2nd/3rd toe the entire hold and keep your chest up. The band tension is helping you stay upright — use it, don\'t fight it. Heels stay flat on the floor.',
+      'You should feel a deep quad burn by the last 15 seconds — that\'s the isometric stimulus that reduces tendon pain over time. Rest 60–90 sec between sets. If the burn is immediate and sharp, check knee angle and ease back slightly.'
+    ]
+  },
+  {
+    key: 'band_walk',
+    match: function(s) { return s.indexOf('band walk') !== -1 || s.indexOf('band walks') !== -1; },
+    type: 'weighted',    // track goblet weight
+    sets: 3,
+    reps: 15,
+    label: '3 × 15 steps each direction',
+    weightKey: 'rehab_band_walk_lbs',
+    defaultWeight: 25,
+    increment: 5,
+    tips: [
+      'Mini-band just above the knees. Hold the goblet weight at chest height. Maintain a slight squat throughout — never fully stand between steps, that drops the hip abductor load.',
+      'Step laterally leading with the outside foot; trail foot follows while keeping constant band tension. Feet should never touch. 15 steps right then 15 steps left = 1 set.',
+      'Keep the torso vertical and hips level. If a hip dips, the goblet is too heavy — reduce before adding valgus stress.',
+      'Progress weight only when all 3 sets complete with zero knee cave. The goblet increases demand on the hip abductors far more than band alone.'
+    ]
+  },
+  {
+    key: 'step_down',
+    match: function(s) { return s.indexOf('step-down') !== -1 || s.indexOf('step down') !== -1; },
+    type: 'weighted',
+    sets: 3,
+    reps: 12,
+    label: '3 × 12 reps each leg',
+    weightKey: 'rehab_step_down_lbs',
+    defaultWeight: 0,
+    increment: 5,
+    tips: [
+      'Stand on a step or box (6–8"). Slight forward lean at the hip, then lower the free leg toward the floor under complete eccentric control.',
+      'Use a mirror or phone camera — the knee must track over the 2nd toe the entire time. If it dives inward, stop, reset, and focus on firing the glute before each rep.',
+      'Eccentric phase should take 3 full seconds. Tap the floor lightly with your free foot, then drive back up through the working heel.',
+      'If knee tracks well but feels unstable, widen your box height first rather than adding weight. Once form is locked, load incrementally.'
+    ]
+  },
+  {
+    key: 'foot_core',
+    match: function(s) { return s.indexOf('foot core') !== -1 || s.indexOf('short foot') !== -1; },
+    type: 'free',
+    label: 'Short foot + single-leg balance',
+    tips: [
+      'Short foot: standing barefoot, draw the ball of the foot toward the heel without curling the toes. This domes the arch and fires the intrinsic foot muscles. Hold 5 sec × 10 reps per foot.',
+      'Single-leg balance: 30–45 sec per leg. Progress from eyes open → eyes closed → small perturbations (slow head turns, reaching one arm). A folded towel or foam pad increases difficulty.',
+      'The foot should stay active and domed throughout — watch for the arch collapsing under fatigue. That collapse transfers poor mechanics up the chain to the knee.',
+      'These drills rebuild foot-to-hip kinetic chain stability. Over several weeks they reduce dynamic valgus during running stance phase.'
+    ]
+  },
+  {
+    key: 'plyo',
+    match: function(s) { return s.indexOf('plyo') !== -1 || s.indexOf('hop') !== -1 || s.indexOf('bounding') !== -1; },
+    type: 'free',
+    sets: 3,
+    reps: 10,
+    label: '3 × 10',
+    tips: [
+      'Land with knee bent, softly absorbing through glute and quad — never let the knee snap straight on contact. Quiet landings = good mechanics.',
+      'Single-leg hops: start with small vertical hops in place focusing on quick ground contact time and a stiff ankle. Height is secondary to landing quality.',
+      'Bounding drills: exaggerate your running stride — powerful hip extension behind you, high knee drive in front. Absorb each landing through hip and knee, not the joint alone.',
+      'Any sharp pain means stop immediately. Plyos are only in the plan when you\'re pain-free through at least 2 clean cycles — take that seriously.'
+    ]
+  },
+  {
+    key: 'sl_squat_box',
+    match: function(s) { return s.indexOf('single-leg squat') !== -1 || s.indexOf('valgus') !== -1; },
+    type: 'free',
+    sets: 3,
+    reps: 10,
+    label: '3 × 10 each leg',
+    tips: [
+      'Place a box or bench ~12" behind you. Balance on one leg, arms forward for counterbalance. Hinge at the hip and lower your hips toward the box under control.',
+      'Mirror or phone camera is mandatory for this exercise — the entire point is real-time valgus biofeedback. Knee dives inward? Stop, reset, fire the glute, start the rep again.',
+      'Touch the box lightly (don\'t sit), then drive back up through the heel while squeezing the glute at the top. The pause-on-contact breaks momentum.',
+      'Visual self-monitoring accelerates neuromuscular reprogramming. Even a week of consistent mirror use produces measurable improvements in dynamic knee alignment.'
+    ]
+  },
+  {
+    key: 'mobility',
+    match: function(s) { return s.indexOf('mobility') !== -1; },
+    type: 'free',
+    label: 'Full lower limb sequence (~15 min)',
+    tips: [
+      'Hip 90/90: sit with both legs bent at 90°, lean over the front shin. 60 sec/side. Targets internal and external hip rotation — tightness here directly increases knee valgus stress during running.',
+      'Half-kneeling hip flexor stretch: lunge low with rear knee down, then posteriorly tilt the pelvis (tuck your tailbone). 45 sec/side. Hip flexor tightness strains the patella and increases anterior knee load.',
+      'Calf/Achilles: slow single-leg heel lowering off a step (3×15) plus standing dorsiflexion wall stretch. Ankle mobility directly controls how the knee tracks during stance phase.',
+      'Supine hamstring stretch with strap (45 sec/side), then 10 slow bodyweight squats as a movement screen. Watch for symmetry in depth and knee tracking — asymmetry is information.'
+    ]
+  }
+];
+
+function rehabMatchExercise(label) {
+  var s = label.toLowerCase();
+  for (var i = 0; i < REHAB_EXERCISES.length; i++) {
+    if (REHAB_EXERCISES[i].match(s)) return REHAB_EXERCISES[i];
+  }
+  // Fallback generic
+  return { key: 'generic', type: 'free', label: label, tips: [] };
+}
+
+// =============================================================
 // RENDER ENGINE
 // =============================================================
 
@@ -636,6 +811,8 @@ function render() {
     case 'workout':  html = rWorkout(); break;
     case 'log_set':  html = rLogSet(); break;
     case 'rest':     html = rRest(); break;
+    case 'calendar': html = rCalendar(); break;
+    case 'rehab':    html = rRehab(); break;
     default:         html = rToday();
   }
 
@@ -654,6 +831,29 @@ function render() {
         APP.pendingSet = APP.pendingSet + 1;
         APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
         APP.screen = 'log_set';
+        render();
+      }
+    }, 1000);
+  }
+
+  if (APP.screen === 'rehab' && APP.rehabTimerActive) {
+    APP.timerInterval = setInterval(function() {
+      APP.rehabTimerRemaining--;
+      var el = document.getElementById('rehab-timer-display');
+      if (el) el.textContent = fmt(APP.rehabTimerRemaining);
+      if (APP.rehabTimerRemaining <= 0) {
+        clearInterval(APP.timerInterval);
+        APP.timerInterval = null;
+        APP.rehabTimerActive = false;
+        playTimerDone();
+        // Mark this set complete and advance
+        APP.rehabSetsCompleted[APP.rehabActiveSet] = true;
+        var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+        var nextSet = APP.rehabActiveSet + 1;
+        if (nextSet < ex.sets) {
+          APP.rehabActiveSet = nextSet;
+          APP.rehabTimerRemaining = ex.duration;
+        }
         render();
       }
     }, 1000);
@@ -677,8 +877,11 @@ function rToday() {
 
   var html = '<div style="padding-top:16px">'
     + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:2px">' + dateStr + '</p>'
-    + '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
+    + '<div style="display:flex;align-items:center;gap:10px">'
     + '<h1 style="font-size:26px">Today</h1>'
+    + '<button onclick="goCalendar()" style="border:none;background:transparent;padding:4px;color:var(--color-text-tertiary);font-size:20px;display:flex;align-items:center" aria-label="Calendar"><i class="ti ti-calendar"></i></button>'
+    + '</div>'
     + '<span style="' + badgeStyle + '">' + badge + '</span>'
     + '</div>';
 
@@ -707,8 +910,9 @@ function rToday() {
     rehabLabel = '5×45s Isometric Knee Pre-Load (plyo suppressed)';
   }
   var rehabLogged = APP.todayLog && APP.todayLog.rehab_completed;
-  var rehabCard = actCard('ti-activity', 'var(--color-bg-warning)', 'var(--color-text-warning)',
-    'Rehab · ' + rehabTiming, rehabLabel, null, 'toggleRehab()', rehabLogged);
+  var rehabEx = rehabMatchExercise(rehabLabel);
+  var rehabSubval = rehabEx.label || null;
+  var rehabCard = rRehabCard(rehabLabel, rehabTiming, rehabSubval, rehabLogged);
 
   var rehabBefore = tp.rehab_timing.indexOf('before') === 0;
 
@@ -836,6 +1040,368 @@ function rStatBox(label, val) {
     + '<p style="font-size:18px;font-weight:500">' + val + '</p>'
     + '<p style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' + label + '</p>'
     + '</div>';
+}
+
+// =============================================================
+// REHAB SCREEN
+// =============================================================
+
+function rRehabCard(label, timing, subval, done) {
+  var checkBtn = done
+    ? '<div style="width:36px;height:36px;border-radius:50%;background:var(--color-text);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-check" style="font-size:18px;color:var(--color-bg)"></i></div>'
+    : '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--color-text-tertiary);flex-shrink:0"></i>';
+  return '<div style="background:var(--color-bg);border:0.5px solid var(--color-border);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;cursor:pointer' + (done ? ';opacity:0.65' : '') + '" onclick="goRehab()">'
+    + '<div style="display:flex;align-items:center;gap:12px">'
+    + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-warning);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+    + '<i class="ti ti-activity" style="font-size:20px;color:var(--color-text-warning)"></i></div>'
+    + '<div style="flex:1">'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">Rehab · ' + timing + '</p>'
+    + '<p style="font-size:16px;font-weight:500">' + label + '</p>'
+    + (subval ? '<p style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">' + subval + '</p>' : '')
+    + '</div>'
+    + checkBtn
+    + '</div></div>';
+}
+
+function rRehab() {
+  var tp  = APP.todayPlan;
+  var rawLabel = tp.rehab_exercise;
+  var ps  = APP.planState;
+  var cfg = APP.planConfig;
+  var suppressedPlyo = ps.in_deload && cfg.deload_suppress_plyo &&
+    rawLabel.toLowerCase().indexOf('plyo') !== -1;
+  if (suppressedPlyo) rawLabel = '5×45s Isometric Knee Pre-Load (plyo suppressed)';
+
+  var ex = rehabMatchExercise(rawLabel);
+  var rehabLogged = APP.todayLog && APP.todayLog.rehab_completed;
+  var allSetsComplete = ex.sets
+    ? APP.rehabSetsCompleted.length >= ex.sets && APP.rehabSetsCompleted.slice(0, ex.sets).every(Boolean)
+    : false;
+
+  var html = '<div style="padding-top:12px">'
+    + '<button onclick="APP.screen=\'today\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:16px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">'
+    + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-warning);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+    + '<i class="ti ti-activity" style="font-size:20px;color:var(--color-text-warning)"></i></div>'
+    + '<div>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary)">Rehab · ' + tp.rehab_timing.replace(/_/g, ' ') + '</p>'
+    + '<h1 style="font-size:20px;font-weight:600;line-height:1.25">' + rawLabel + '</h1>'
+    + '</div></div>';
+
+  if (suppressedPlyo) {
+    html += '<div style="padding:10px 14px;background:var(--color-bg-warning);border-radius:var(--radius-md);margin:10px 0;font-size:12px;color:var(--color-text-warning)">'
+      + '<i class="ti ti-alert-triangle" style="margin-right:6px"></i>Plyometrics suppressed during deload — substituted with isometric hold.</div>';
+  }
+
+  // ---- FORM TIPS ----
+  if (ex.tips && ex.tips.length) {
+    html += '<details style="margin:14px 0" open>'
+      + '<summary style="font-size:13px;font-weight:500;cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;padding:10px 14px;background:var(--color-bg-secondary);border-radius:var(--radius-md)">'
+      + '<i class="ti ti-bulb" style="color:var(--color-text-warning);font-size:14px"></i>Form tips</summary>'
+      + '<div style="padding:10px 4px 0">';
+    ex.tips.forEach(function(tip, i) {
+      html += '<div style="display:flex;gap:10px;padding:8px 0;' + (i < ex.tips.length - 1 ? 'border-bottom:0.5px solid var(--color-border)' : '') + '">'
+        + '<span style="font-size:11px;font-weight:600;color:var(--color-text-warning);flex-shrink:0;padding-top:1px">' + (i + 1) + '</span>'
+        + '<p style="font-size:13px;color:var(--color-text-secondary);line-height:1.5">' + tip + '</p>'
+        + '</div>';
+    });
+    html += '</div></details>';
+  }
+
+  // ---- TIMED SETS (isometric) ----
+  if (ex.type === 'timed') {
+    html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">' + ex.label + '</p>';
+
+    // Set circles
+    html += '<div style="display:flex;gap:8px;margin-bottom:20px">';
+    for (var s = 0; s < ex.sets; s++) {
+      var isDone   = APP.rehabSetsCompleted[s] === true;
+      var isActive = !isDone && s === APP.rehabActiveSet;
+      var isPast   = s < APP.rehabActiveSet && !isDone;
+      var circleBg = isDone ? 'var(--color-text-success)' : isActive ? 'var(--color-text-warning)' : 'var(--color-bg-secondary)';
+      var circleColor = (isDone || isActive) ? 'var(--color-bg)' : 'var(--color-text-tertiary)';
+      var circleLabel = isDone ? '<i class="ti ti-check" style="font-size:14px"></i>' : (s + 1);
+      html += '<div style="flex:1;height:44px;border-radius:var(--radius-md);background:' + circleBg + ';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:' + circleColor + ';border:0.5px solid ' + (isActive ? 'var(--color-text-warning)' : 'var(--color-border)') + '">' + circleLabel + '</div>';
+    }
+    html += '</div>';
+
+    // Timer display for active set
+    var activeSetDone = APP.rehabSetsCompleted[APP.rehabActiveSet] === true;
+    if (!activeSetDone && APP.rehabActiveSet < ex.sets) {
+      var timerVal = fmt(APP.rehabTimerRemaining);
+      html += '<div style="text-align:center;margin-bottom:20px">'
+        + '<div id="rehab-timer-display" style="font-size:64px;font-weight:200;letter-spacing:-2px;line-height:1">' + timerVal + '</div>'
+        + '<p style="font-size:12px;color:var(--color-text-tertiary);margin-top:4px">Set ' + (APP.rehabActiveSet + 1) + ' of ' + ex.sets + '</p>'
+        + '</div>';
+
+      if (APP.rehabTimerActive) {
+        html += '<button onclick="rehabTimerPause()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-bg-secondary);color:var(--color-text);border:0.5px solid var(--color-border);font-size:16px;font-weight:500;margin-bottom:10px">Pause</button>';
+      } else {
+        html += '<button onclick="rehabTimerStart()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">'
+          + (APP.rehabTimerRemaining < ex.duration ? 'Resume' : 'Start set ' + (APP.rehabActiveSet + 1)) + '</button>';
+        if (APP.rehabTimerRemaining < ex.duration) {
+          html += '<button onclick="rehabTimerSkip()" style="width:100%;padding:12px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-secondary);border:0.5px solid var(--color-border);font-size:14px;margin-bottom:10px">Mark set done</button>';
+        }
+      }
+    }
+
+    if (allSetsComplete) {
+      html += rRehabCompleteButton(rehabLogged);
+    }
+  }
+
+  // ---- WEIGHTED SETS (band walks, step-downs) ----
+  else if (ex.type === 'weighted') {
+    // Weight adjuster
+    var w = APP.rehabWeight;
+    html += '<div style="margin-bottom:16px">'
+      + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">Weight</p>'
+      + '<div style="display:flex;align-items:center;gap:0;border:0.5px solid var(--color-border);border-radius:var(--radius-md);overflow:hidden">'
+      + '<button onclick="rehabWeightAdj(-' + ex.increment + ')" style="padding:12px 20px;background:var(--color-bg-secondary);border:none;font-size:20px;color:var(--color-text);min-width:56px">−</button>'
+      + '<div style="flex:1;text-align:center;padding:12px 8px">'
+      + '<span style="font-size:24px;font-weight:500">' + w + '</span>'
+      + '<span style="font-size:13px;color:var(--color-text-secondary);margin-left:4px">lbs</span>'
+      + '</div>'
+      + '<button onclick="rehabWeightAdj(' + ex.increment + ')" style="padding:12px 20px;background:var(--color-bg-secondary);border:none;font-size:20px;color:var(--color-text);min-width:56px">+</button>'
+      + '</div></div>';
+
+    // Set tracker
+    html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">' + ex.label + '</p>';
+    html += '<div style="display:flex;gap:8px;margin-bottom:16px">';
+    for (var s2 = 0; s2 < ex.sets; s2++) {
+      var s2Done = APP.rehabSetsCompleted[s2] === true;
+      var s2Active = !s2Done && s2 === APP.rehabSetsCompleted.filter(Boolean).length;
+      html += '<div style="flex:1;height:44px;border-radius:var(--radius-md);background:' + (s2Done ? 'var(--color-text-success)' : s2Active ? 'var(--color-bg-secondary)' : 'var(--color-bg-secondary)') + ';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:' + (s2Done ? 'var(--color-bg)' : 'var(--color-text-tertiary)') + ';border:0.5px solid ' + (s2Active ? 'var(--color-border-md)' : 'var(--color-border)') + ';opacity:' + (s2Done || s2Active ? '1' : '0.4') + '">'
+        + (s2Done ? '<i class="ti ti-check" style="font-size:14px"></i>' : (s2Active ? ex.reps + ' reps' : (s2 + 1)))
+        + '</div>';
+    }
+    html += '</div>';
+
+    var completedCount = APP.rehabSetsCompleted.filter(Boolean).length;
+    if (completedCount < ex.sets) {
+      html += '<button onclick="rehabLogSet()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Log set ' + (completedCount + 1) + ' · ' + ex.reps + ' reps</button>';
+    }
+
+    if (allSetsComplete) {
+      html += rRehabCompleteButton(rehabLogged);
+    }
+  }
+
+  // ---- FREE (form tips + complete) ----
+  else {
+    if (ex.sets) {
+      html += '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:16px">' + ex.label + '</p>';
+    }
+    html += rRehabCompleteButton(rehabLogged);
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function rRehabCompleteButton(done) {
+  if (done) {
+    return '<div style="display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--color-bg-secondary);border-radius:var(--radius-md);margin-top:8px">'
+      + '<i class="ti ti-circle-check" style="font-size:20px;color:var(--color-text-success)"></i>'
+      + '<p style="font-size:15px;font-weight:500">Rehab complete</p>'
+      + '<button onclick="toggleRehab()" style="margin-left:auto;padding:6px 14px;border-radius:var(--radius-md);background:transparent;border:0.5px solid var(--color-border);font-size:12px;color:var(--color-text-secondary)">Undo</button>'
+      + '</div>';
+  }
+  return '<button onclick="rehabMarkComplete()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-top:8px">Mark complete</button>';
+}
+
+// =============================================================
+// CALENDAR SCREEN
+// =============================================================
+
+function rCalendar() {
+  var year  = APP.calViewYear;
+  var month = APP.calViewMonth;
+  var today = APP.today;
+  var pad   = function(n) { return n < 10 ? '0' + n : '' + n; };
+  var monthNames = ['January','February','March','April','May','June',
+    'July','August','September','October','November','December'];
+
+  var html = '<div style="padding-top:12px">'
+    + '<button onclick="APP.screen=\'today\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:16px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
+    + '<h1 style="font-size:24px">Calendar</h1>'
+    + '<div style="display:flex;align-items:center;gap:2px">'
+    + '<button onclick="calNav(-1)" style="width:34px;height:34px;border-radius:50%;border:0.5px solid var(--color-border);background:transparent;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-chevron-left" style="font-size:16px"></i></button>'
+    + '<span style="font-size:13px;font-weight:500;min-width:116px;text-align:center">' + monthNames[month] + ' ' + year + '</span>'
+    + '<button onclick="calNav(1)" style="width:34px;height:34px;border-radius:50%;border:0.5px solid var(--color-border);background:transparent;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-chevron-right" style="font-size:16px"></i></button>'
+    + '</div></div>';
+
+  if (APP.calLoading) {
+    html += '<div style="text-align:center;padding:60px 0;color:var(--color-text-secondary)"><i class="ti ti-loader" style="font-size:28px"></i></div></div>';
+    return html;
+  }
+
+  // Build lookup maps
+  var logMap = {};
+  APP.calLogs.forEach(function(l) { logMap[l.log_date] = l; });
+  var sessionMap = {};
+  APP.calSessions.forEach(function(s) {
+    var d = new Date(s.completed_at);
+    var ds = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    if (!sessionMap[ds]) sessionMap[ds] = [];
+    sessionMap[ds].push(s);
+  });
+
+  // Day-of-week header row
+  html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:2px">'
+    + ['S','M','T','W','T','F','S'].map(function(h) {
+      return '<div style="text-align:center;font-size:11px;color:var(--color-text-tertiary);padding:4px 0;font-weight:500">' + h + '</div>';
+    }).join('') + '</div>';
+
+  var firstDay    = new Date(year, month, 1).getDay();
+  var daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px">';
+
+  for (var b = 0; b < firstDay; b++) html += '<div></div>';
+
+  for (var d = 1; d <= daysInMonth; d++) {
+    var dateStr  = year + '-' + pad(month + 1) + '-' + pad(d);
+    var isToday  = dateStr === today;
+    var isFuture = dateStr > today;
+    var log      = logMap[dateStr];
+    var sessions = sessionMap[dateStr] || [];
+    var isSel    = APP.calSelectedDate === dateStr;
+    var hasLift  = sessions.length > 0;
+    var hasRun   = log && log.run_completed;
+    var hasRehab = log && log.rehab_completed;
+    var pain     = log ? log.knee_pain_level : null;
+
+    var cellBg = 'var(--color-bg)';
+    if (!isFuture && pain !== null) {
+      if      (pain >= 4) cellBg = 'var(--color-bg-danger)';
+      else if (pain === 3) cellBg = 'var(--color-bg-warning)';
+      else                 cellBg = 'var(--color-bg-success)';
+    }
+
+    var bw  = (isSel || isToday) ? '1.5px' : '0.5px';
+    var bc  = isSel ? 'var(--color-text)' : isToday ? 'var(--color-text-info)' : 'var(--color-border)';
+    var opa = isFuture ? 'opacity:0.35;' : '';
+    var clickable = !isFuture && (log || hasLift);
+    var onclick = clickable ? 'onclick="calSelectDate(\'' + dateStr + '\')"' : '';
+
+    html += '<div ' + onclick + ' style="' + opa + 'background:' + cellBg + ';border:' + bw + ' solid ' + bc + ';border-radius:var(--radius-md);padding:5px 3px 6px;min-height:52px;display:flex;flex-direction:column;align-items:center;' + (clickable ? 'cursor:pointer' : '') + '">'
+      + '<span style="font-size:12px;font-weight:' + (isToday ? '700' : '400') + ';color:' + (isToday ? 'var(--color-text-info)' : 'var(--color-text)') + '">' + d + '</span>';
+
+    if (!isFuture && (hasLift || hasRun || hasRehab)) {
+      html += '<div style="display:flex;gap:2px;margin-top:4px;flex-wrap:wrap;justify-content:center">';
+      if (hasLift)  html += '<span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-success);flex-shrink:0"></span>';
+      if (hasRun)   html += '<span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-info);flex-shrink:0"></span>';
+      if (hasRehab) html += '<span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-warning);flex-shrink:0"></span>';
+      html += '</div>';
+    } else if (!isFuture && log) {
+      html += '<div style="margin-top:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-tertiary);display:inline-block"></span></div>';
+    }
+
+    html += '</div>';
+  }
+
+  html += '</div>';
+
+  // Legend
+  html += '<div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">'
+    + rCalLegendDot('var(--color-text-success)', 'Lift')
+    + rCalLegendDot('var(--color-text-info)',    'Run')
+    + rCalLegendDot('var(--color-text-warning)', 'Rehab')
+    + '</div>';
+
+  // Selected day detail
+  if (APP.calSelectedDate) {
+    html += rCalDayDetail(APP.calSelectedDate, logMap[APP.calSelectedDate], sessionMap[APP.calSelectedDate] || []);
+  }
+
+  // Upcoming queue
+  html += rCalUpcoming();
+
+  html += '</div>';
+  return html;
+}
+
+function rCalLegendDot(color, label) {
+  return '<span style="font-size:11px;color:var(--color-text-secondary);display:flex;align-items:center;gap:4px">'
+    + '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';display:inline-block;flex-shrink:0"></span>'
+    + label + '</span>';
+}
+
+function rCalDayDetail(dateStr, log, sessions) {
+  var d = new Date(dateStr + 'T12:00:00');
+  var label = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+  var html = '<div style="margin-top:14px;padding:14px;background:var(--color-bg-secondary);border-radius:var(--radius-lg)">'
+    + '<p style="font-size:13px;font-weight:500;margin-bottom:10px">' + label + '</p>';
+
+  if (log) {
+    var pc = log.knee_pain_level >= 4 ? 'var(--color-text-danger)'
+           : log.knee_pain_level === 3 ? 'var(--color-text-warning)' : 'var(--color-text-success)';
+    html += rCalDetailRow('ti-clipboard-check', pc,
+      'Pain ' + log.knee_pain_level + '/5' + (log.joint_fullness ? ' · Swelling' : ''));
+    if (log.run_completed)   html += rCalDetailRow('ti-run',      'var(--color-text-info)',    'Run completed');
+    if (log.rehab_completed) html += rCalDetailRow('ti-activity', 'var(--color-text-warning)', 'Rehab completed');
+    if (log.plan_phase) {
+      html += '<p style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">Phase ' + log.plan_phase + ' · Cycle day ' + log.plan_cycle_day + '</p>';
+    }
+  }
+
+  sessions.forEach(function(s) {
+    html += rCalDetailRow('ti-barbell', 'var(--color-text-success)', 'Day ' + s.gym_day + ' lift completed');
+  });
+
+  if (!log && sessions.length === 0) {
+    html += '<p style="font-size:13px;color:var(--color-text-tertiary)">No activities logged.</p>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function rCalDetailRow(icon, color, text) {
+  return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+    + '<i class="ti ' + icon + '" style="font-size:14px;color:' + color + ';flex-shrink:0"></i>'
+    + '<span style="font-size:13px;color:' + color + '">' + text + '</span></div>';
+}
+
+function rCalUpcoming() {
+  if (!APP.calUpcoming || APP.calUpcoming.length === 0) return '';
+
+  var html = '<div style="margin-top:24px">'
+    + '<p style="font-size:13px;font-weight:500;margin-bottom:2px">Coming up</p>'
+    + '<p style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:12px">Next sessions in planned order — dates depend on when you train</p>';
+
+  APP.calUpcoming.forEach(function(day, i) {
+    var rows = [];
+    if (day.is_lift_day) {
+      rows.push({ icon: 'ti-barbell',  col: 'var(--color-text-success)', text: 'Lift' });
+    }
+    if (day.run_miles) {
+      var rt = 'Run ' + day.run_miles + ' mi';
+      if (day.run_notes) rt += ' — ' + day.run_notes;
+      rows.push({ icon: 'ti-run', col: 'var(--color-text-info)', text: rt });
+    }
+    if (day.rehab_timing) {
+      rows.push({ icon: 'ti-activity', col: 'var(--color-text-warning)',
+        text: 'Rehab (' + day.rehab_timing.replace(/_/g, ' ') + ')' });
+    }
+
+    html += '<div style="display:flex;gap:10px;padding:10px 0;'
+      + (i < APP.calUpcoming.length - 1 ? 'border-bottom:0.5px solid var(--color-border)' : '') + '">'
+      + '<span style="font-size:11px;background:var(--color-bg-secondary);border-radius:var(--radius-md);padding:3px 8px;white-space:nowrap;color:var(--color-text-secondary);font-weight:500;flex-shrink:0;margin-top:1px">Day ' + day.day_number + '</span>'
+      + '<div style="flex:1">'
+      + rows.map(function(r) {
+          return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+            + '<i class="ti ' + r.icon + '" style="font-size:12px;color:' + r.col + ';flex-shrink:0"></i>'
+            + '<span style="font-size:13px">' + r.text + '</span></div>';
+        }).join('')
+      + '</div></div>';
+  });
+
+  html += '</div>';
+  return html;
 }
 
 // =============================================================
@@ -1330,6 +1896,127 @@ async function toggleRehab() {
     .update({ rehab_completed: newVal })
     .eq('log_date', APP.today);
   if (!error) APP.todayLog.rehab_completed = newVal;
+  render();
+}
+
+function goRehab() {
+  if (!APP.todayLog) { goCheckin(); return; }
+  // Init set state for this exercise
+  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  var numSets = ex.sets || 0;
+  if (APP.rehabSetsCompleted.length !== numSets) {
+    APP.rehabSetsCompleted = [];
+    for (var i = 0; i < numSets; i++) APP.rehabSetsCompleted.push(false);
+  }
+  var prevActive = APP.rehabActiveSet;
+  APP.rehabActiveSet = APP.rehabSetsCompleted.indexOf(false);
+  if (APP.rehabActiveSet < 0) APP.rehabActiveSet = numSets - 1;
+  if (ex.type === 'timed') {
+    // Reset timer only if we moved to a new set (not returning mid-hold)
+    if (APP.rehabActiveSet !== prevActive || APP.rehabTimerRemaining <= 0) {
+      APP.rehabTimerRemaining = ex.duration;
+    }
+    APP.rehabTimerActive = false; // always pause on re-entry
+  }
+  // Load saved weight for weighted exercises
+  if (ex.type === 'weighted' && ex.weightKey) {
+    var saved = localStorage.getItem(ex.weightKey);
+    APP.rehabWeight = saved !== null ? parseInt(saved, 10) : ex.defaultWeight;
+  }
+  APP.screen = 'rehab';
+  render();
+}
+
+function rehabTimerStart() {
+  APP.rehabTimerActive = true;
+  render();
+}
+
+function rehabTimerPause() {
+  APP.rehabTimerActive = false;
+  clearInterval(APP.timerInterval);
+  APP.timerInterval = null;
+  render();
+}
+
+function rehabTimerSkip() {
+  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  APP.rehabTimerActive = false;
+  clearInterval(APP.timerInterval);
+  APP.timerInterval = null;
+  APP.rehabSetsCompleted[APP.rehabActiveSet] = true;
+  var next = APP.rehabActiveSet + 1;
+  if (next < ex.sets) {
+    APP.rehabActiveSet = next;
+    APP.rehabTimerRemaining = ex.duration;
+  }
+  render();
+}
+
+function rehabWeightAdj(delta) {
+  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  APP.rehabWeight = Math.max(0, APP.rehabWeight + delta);
+  if (ex.weightKey) localStorage.setItem(ex.weightKey, APP.rehabWeight);
+  render();
+}
+
+function rehabLogSet() {
+  var completedCount = APP.rehabSetsCompleted.filter(Boolean).length;
+  if (completedCount < APP.rehabSetsCompleted.length) {
+    APP.rehabSetsCompleted[completedCount] = true;
+    var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+    if (ex.weightKey) localStorage.setItem(ex.weightKey, APP.rehabWeight);
+  }
+  render();
+}
+
+async function rehabMarkComplete() {
+  if (!APP.todayLog) return;
+  var { error } = await db.from('daily_log')
+    .update({ rehab_completed: true })
+    .eq('log_date', APP.today);
+  if (!error) APP.todayLog.rehab_completed = true;
+  render();
+}
+
+async function goCalendar() {
+  var now = new Date();
+  APP.calViewYear     = now.getFullYear();
+  APP.calViewMonth    = now.getMonth();
+  APP.calSelectedDate = null;
+  APP.calLoading      = true;
+  APP.screen = 'calendar';
+  render();
+  try {
+    await loadCalendarData(APP.calViewYear, APP.calViewMonth);
+  } catch(e) {
+    console.error('Calendar load error:', e);
+  }
+  APP.calLoading = false;
+  render();
+}
+
+async function calNav(dir) {
+  var m = APP.calViewMonth + dir;
+  var y = APP.calViewYear;
+  if (m < 0)  { m = 11; y--; }
+  if (m > 11) { m = 0;  y++; }
+  APP.calViewMonth    = m;
+  APP.calViewYear     = y;
+  APP.calSelectedDate = null;
+  APP.calLoading      = true;
+  render();
+  try {
+    await loadCalendarData(y, m);
+  } catch(e) {
+    console.error('Calendar nav error:', e);
+  }
+  APP.calLoading = false;
+  render();
+}
+
+function calSelectDate(dateStr) {
+  APP.calSelectedDate = APP.calSelectedDate === dateStr ? null : dateStr;
   render();
 }
 
