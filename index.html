@@ -129,10 +129,11 @@
 <script>
 // =============================================================
 // CONFIG — Supabase project credentials
-// Anon key is public-safe (protected by DB-level RLS).
+// Anon key is public-safe; RLS enforces user-level isolation.
 // =============================================================
 var SUPABASE_URL  = 'https://copzqbnjoakvcrvmedev.supabase.co';
 var SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNvcHpxYm5qb2FrdmNydm1lZGV2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2NzYzNTAsImV4cCI6MjA5NTI1MjM1MH0._2TOsZiSQtuC_neDFOjxZNbR7_lkKw9baxeKTGN1Amo';
+var USER_EMAIL    = 'ben.zion.rotter@gmail.com';
 
 var db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
   db: { schema: 'lift' }
@@ -212,6 +213,57 @@ var APP = {
 // SUPABASE DATA LAYER
 // =============================================================
 
+// Sign in once at boot; reuse the session supabase-js persists in localStorage.
+// If no valid session exists, show a password prompt — nothing is stored in source.
+async function signIn() {
+  var { data: sessionData } = await db.auth.getSession();
+  if (sessionData && sessionData.session) {
+    APP.userId = sessionData.session.user.id;
+    return;
+  }
+  // No saved session — prompt for password (runs once per device until session expires)
+  return new Promise(function(resolve, reject) {
+    var scr = document.getElementById('screen');
+    scr.innerHTML =
+      '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;gap:16px;padding:32px">'
+      + '<i class="ti ti-barbell" style="font-size:40px;color:var(--color-text-tertiary)"></i>'
+      + '<p style="font-weight:500;font-size:18px">Lift</p>'
+      + '<input id="pwd-input" type="password" placeholder="Password" autocomplete="current-password"'
+      + ' style="width:100%;max-width:280px;padding:12px 16px;border-radius:var(--radius-md);'
+      + 'border:0.5px solid var(--color-border-md);background:var(--color-bg-secondary);'
+      + 'color:var(--color-text);font-size:16px;font-family:inherit;outline:none">'
+      + '<p id="pwd-error" style="color:var(--color-text-danger);font-size:13px;min-height:16px"></p>'
+      + '<button id="pwd-btn" onclick="doSignIn()" '
+      + ' style="width:100%;max-width:280px;padding:14px;border-radius:var(--radius-md);'
+      + 'border:none;background:var(--color-text);color:var(--color-bg);font-size:16px;font-weight:500">'
+      + 'Sign in</button>'
+      + '</div>';
+
+    document.getElementById('pwd-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') doSignIn();
+    });
+    setTimeout(function() { document.getElementById('pwd-input').focus(); }, 50);
+
+    window.doSignIn = async function() {
+      var pwd = document.getElementById('pwd-input').value;
+      var btn = document.getElementById('pwd-btn');
+      var err = document.getElementById('pwd-error');
+      btn.disabled = true;
+      btn.textContent = 'Signing in…';
+      err.textContent = '';
+      var { data, error } = await db.auth.signInWithPassword({ email: USER_EMAIL, password: pwd });
+      if (error) {
+        err.textContent = error.message;
+        btn.disabled = false;
+        btn.textContent = 'Sign in';
+        return;
+      }
+      APP.userId = data.user.id;
+      resolve();
+    };
+  });
+}
+
 // Returns local date as YYYY-MM-DD (avoids toISOString() UTC skew)
 function localDateStr() {
   var d = new Date();
@@ -224,6 +276,7 @@ async function loadBootData() {
   // Refresh so midnight crossings pick up the new date without a reload
   APP.today = localDateStr();
   try {
+    await signIn();
     var [stateRes, configRes, logRes] = await Promise.all([
       db.from('plan_state').select('*').single(),
       db.from('plan_config').select('*').single(),
@@ -302,16 +355,17 @@ async function loadExercises(gymDay) {
 
 async function saveDailyLog(painLevel, jointFullness) {
   var payload = {
-    log_date:       APP.today,
-    plan_phase:     APP.planState.current_phase,
-    plan_cycle_day: APP.planState.current_cycle_day,
+    user_id:         APP.userId,   // required for upsert conflict detection
+    log_date:        APP.today,
+    plan_phase:      APP.planState.current_phase,
+    plan_cycle_day:  APP.planState.current_cycle_day,
     knee_pain_level: painLevel,
     joint_fullness:  jointFullness
   };
 
   var { data, error } = await db
     .from('daily_log')
-    .upsert(payload, { onConflict: 'log_date' })
+    .upsert(payload, { onConflict: 'user_id,log_date' })
     .select()
     .single();
 
