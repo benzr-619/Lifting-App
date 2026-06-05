@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Lift</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --color-bg: #ffffff;
+      --color-bg-secondary: #f5f5f4;
+      --color-bg-tertiary: #eeece8;
+      --color-bg-success: #eaf3de;
+      --color-bg-info: #e6f1fb;
+      --color-bg-warning: #faeeda;
+      --color-bg-danger: #fde8e8;
+      --color-border: rgba(0,0,0,0.12);
+      --color-border-md: rgba(0,0,0,0.25);
+      --color-text: #1a1a18;
+      --color-text-secondary: #5f5e5a;
+      --color-text-tertiary: #888780;
+      --color-text-success: #3b6d11;
+      --color-text-info: #185fa5;
+      --color-text-warning: #854f0b;
+      --color-text-danger: #9b1c1c;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-bg: #1c1c1a;
+        --color-bg-secondary: #262624;
+        --color-bg-tertiary: #2c2c2a;
+        --color-bg-success: #17340a;
+        --color-bg-info: #042c53;
+        --color-bg-warning: #412402;
+        --color-bg-danger: #3b0a0a;
+        --color-border: rgba(255,255,255,0.12);
+        --color-border-md: rgba(255,255,255,0.25);
+        --color-text: #f1efe8;
+        --color-text-secondary: #b4b2a9;
+        --color-text-tertiary: #888780;
+        --color-text-success: #c0dd97;
+        --color-text-info: #b5d4f4;
+        --color-text-warning: #fac775;
+        --color-text-danger: #fca5a5;
+      }
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--color-bg-tertiary);
+      color: var(--color-text);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 0;
+    }
+
+    #app {
+      width: 100%;
+      max-width: 430px;
+      min-height: 100vh;
+      background: var(--color-bg);
+    }
+
+    #screen {
+      padding: 8px 16px 48px;
+    }
+
+    button { font-family: inherit; cursor: pointer; }
+    p { margin: 0; }
+    h1 { font-weight: 500; }
+
+    /* Pain selector buttons */
+    .pain-btn {
+      flex: 1;
+      padding: 14px 4px;
+      border-radius: var(--radius-md);
+      border: 0.5px solid var(--color-border-md);
+      background: var(--color-bg-secondary);
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--color-text);
+      text-align: center;
+      transition: background 0.1s;
+    }
+    .pain-btn.selected {
+      background: var(--color-text);
+      color: var(--color-bg);
+      border-color: var(--color-text);
+    }
+
+    /* Readiness pill */
+    .readiness-green { background: var(--color-bg-success); color: var(--color-text-success); }
+    .readiness-amber { background: var(--color-bg-warning); color: var(--color-text-warning); }
+    .readiness-red   { background: var(--color-bg-danger);  color: var(--color-text-danger); }
+
+    /* Loading / error states */
+    .loading-wrap {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 60vh; flex-direction: column; gap: 12px;
+      color: var(--color-text-secondary); font-size: 15px;
+    }
+
+    /* Deload banner */
+    .deload-banner {
+      background: var(--color-bg-warning);
+      border: 0.5px solid var(--color-text-warning);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      font-size: 13px;
+      color: var(--color-text-warning);
+    }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <div id="screen"><div class="loading-wrap"><i class="ti ti-loader" style="font-size:28px"></i><span>Loading…</span></div></div>
+</div>
+
+<script>
+// =============================================================
+// CONFIG — Supabase project credentials
+// Anon key is public-safe (protected by DB-level RLS).
+// =============================================================
+var SUPABASE_URL  = 'https://copzqbnjoakvcrvmedev.supabase.co';
+var SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNvcHpxYm5qb2FrdmNydm1lZGV2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2NzYzNTAsImV4cCI6MjA5NTI1MjM1MH0._2TOsZiSQtuC_neDFOjxZNbR7_lkKw9baxeKTGN1Amo';
+
+var db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
+  db: { schema: 'lift' }
+});
+
+// =============================================================
+// APP STATE
+// =============================================================
+var APP = {
+  // Screen IDs:
+  //  'today'       — home / today view
+  //  'checkin'     — morning check-in
+  //  'workout'     — exercise list for the day
+  //  'log_set'     — log a single set
+  //  'rest'        — rest timer
+  screen: 'today',
+
+  // Loaded from DB on boot
+  planState:  null,  // lift.plan_state row
+  planConfig: null,  // lift.plan_config row
+  todayPlan:  null,  // lift.cycle_plan row for today's day_number
+  todayLog:   null,  // lift.daily_log row (may be null if not checked in yet)
+  readiness:  null,  // 'green' | 'amber' | 'red' | null
+
+  // Exercises for today's gym day
+  exercises:  [],    // [{...exercise, state: {...exercise_state}}]
+
+  // Active session
+  sessionId:      null,
+  exIndex:        0,   // which exercise we're on
+  setLogged:      [false, false, false],
+  loggedReps:     [null, null, null],
+  loggedSkipped:  [false, false, false],
+  skipReasons:    [null, null, null],
+
+  // Log-set screen
+  pendingSet:     0,
+  pendingReps:    10,
+
+  // Rest timer
+  timerActive:    false,
+  timerRemaining: 60,
+  timerInterval:  null,
+
+  // Check-in form state
+  ciPain:         null,
+  ciSwelling:     false,
+
+  // Today's date string YYYY-MM-DD
+  today: new Date().toISOString().slice(0, 10),
+
+  // Set true when workout is finished this session
+  liftCompletedToday: false,
+
+  // Set true on set 3 to log reps but block progression
+  formHold: false
+};
+
+// =============================================================
+// SUPABASE DATA LAYER
+// =============================================================
+
+async function loadBootData() {
+  try {
+    var [stateRes, configRes, logRes] = await Promise.all([
+      db.from('plan_state').select('*').single(),
+      db.from('plan_config').select('*').single(),
+      db.from('daily_log').select('*').eq('log_date', APP.today).maybeSingle()
+    ]);
+
+    if (stateRes.error)  throw stateRes.error;
+    if (configRes.error) throw configRes.error;
+
+    APP.planState  = stateRes.data;
+    APP.planConfig = configRes.data;
+    APP.todayLog   = logRes.data; // null = not checked in
+
+    // Handle deferred day-advance (set when workout completed, applied next calendar day)
+    var pendingRaw = localStorage.getItem('lift_advance_pending');
+    if (pendingRaw) {
+      try {
+        var pending = JSON.parse(pendingRaw);
+        if (pending.date === APP.today) {
+          // Still the same day — show today's completed state, don't advance yet
+          APP.liftCompletedToday = true;
+        } else if (pending.date < APP.today) {
+          // New day — apply the deferred advance now
+          await updatePlanState({ current_gym_day: pending.nextGymDay });
+          await advanceCycleDay();
+          localStorage.removeItem('lift_advance_pending');
+          // APP.planState is updated in-memory by the calls above
+        }
+      } catch(e) {
+        // Corrupted entry — discard it
+        localStorage.removeItem('lift_advance_pending');
+      }
+    }
+
+    // Compute cycle_plan day_number from cursor
+    var dayNum = (APP.planState.current_phase - 1) * 8 + APP.planState.current_cycle_day;
+    var planRes = await db.from('cycle_plan').select('*').eq('day_number', dayNum).single();
+    if (planRes.error) throw planRes.error;
+    APP.todayPlan = planRes.data;
+
+    // Load readiness from view
+    var readRes = await db.from('v_readiness').select('readiness').maybeSingle();
+    APP.readiness = readRes.data ? readRes.data.readiness : null;
+
+    // Load exercises if today is a lift day (which day = independent cursor)
+    if (APP.todayPlan.is_lift_day) {
+      await loadExercises(APP.planState.current_gym_day);
+    }
+
+    render();
+  } catch (e) {
+    document.getElementById('screen').innerHTML =
+      '<div class="loading-wrap"><i class="ti ti-alert-circle" style="font-size:28px;color:var(--color-text-danger)"></i>'
+      + '<span>Could not load data</span>'
+      + '<span style="font-size:12px;color:var(--color-text-tertiary)">' + e.message + '</span>'
+      + '<button onclick="loadBootData()" style="margin-top:8px;padding:10px 24px;border-radius:var(--radius-md);border:0.5px solid var(--color-border-md);background:transparent;font-size:14px;color:var(--color-text)">Retry</button>'
+      + '</div>';
+  }
+}
+
+async function loadExercises(gymDay) {
+  var { data, error } = await db
+    .from('exercises')
+    .select('*, exercise_state(*)')
+    .eq('gym_day', gymDay)
+    .order('day_order', { ascending: true })
+    .order('is_optional', { ascending: true });
+
+  if (error) throw error;
+  // Flatten: attach state fields directly for convenience
+  APP.exercises = data.map(function(ex) {
+    var st = ex.exercise_state && ex.exercise_state[0] ? ex.exercise_state[0] : (ex.exercise_state || {});
+    return Object.assign({}, ex, { state: st });
+  });
+}
+
+async function saveDailyLog(painLevel, jointFullness) {
+  var payload = {
+    log_date:       APP.today,
+    plan_phase:     APP.planState.current_phase,
+    plan_cycle_day: APP.planState.current_cycle_day,
+    knee_pain_level: painLevel,
+    joint_fullness:  jointFullness
+  };
+
+  var { data, error } = await db
+    .from('daily_log')
+    .upsert(payload, { onConflict: 'log_date' })
+    .select()
+    .single();
+
+  if (error) throw error;
+  APP.todayLog = data;
+  return data;
+}
+
+async function refreshReadiness() {
+  var { data } = await db.from('v_readiness').select('readiness').maybeSingle();
+  APP.readiness = data ? data.readiness : null;
+}
+
+async function createSession(gymDay) {
+  var { data, error } = await db
+    .from('sessions')
+    .insert({ gym_day: gymDay })
+    .select()
+    .single();
+  if (error) throw error;
+  APP.sessionId = data.id;
+  return data;
+}
+
+async function logSessionSet(exerciseId, setNumber, weightLbs, targetReps, actualReps, isBodyweight, status, skipReason) {
+  var payload = {
+    session_id:  APP.sessionId,
+    exercise_id: exerciseId,
+    set_number:  setNumber,
+    weight_lbs:  isBodyweight ? null : weightLbs,
+    target_reps: targetReps,
+    actual_reps: status === 'completed' ? actualReps : null,
+    set_status:  status,
+    skip_reason: skipReason || null
+  };
+  var { error } = await db.from('session_sets').insert(payload);
+  if (error) throw error;
+}
+
+async function completeSession() {
+  var { error } = await db
+    .from('sessions')
+    .update({ completed_at: new Date().toISOString() })
+    .eq('id', APP.sessionId);
+  if (error) throw error;
+}
+
+async function updatePlanState(patch) {
+  var { error } = await db
+    .from('plan_state')
+    .update(Object.assign(patch, { updated_at: new Date().toISOString() }))
+    .eq('id', APP.planState.id);
+  if (error) throw error;
+  Object.assign(APP.planState, patch);
+}
+
+async function updateExerciseState(exerciseId, patch) {
+  var { error } = await db
+    .from('exercise_state')
+    .update(Object.assign(patch, { updated_at: new Date().toISOString() }))
+    .eq('exercise_id', exerciseId);
+  if (error) throw error;
+}
+
+// =============================================================
+// PROGRESSION ENGINE
+// =============================================================
+
+// Returns the weight variant ('rep_ladder' or 'classic') based on
+// whether the 5-lb increment is >20% of set3 weight.
+function progressionVariant(set3Weight) {
+  if (!set3Weight || set3Weight === 0) return 'rep_ladder';
+  return (5 / set3Weight > 0.20) ? 'rep_ladder' : 'classic';
+}
+
+// Target weights for set2/set1 in classic mode
+function classicTargets(set3Weight) {
+  return {
+    target_s2: Math.ceil(set3Weight * 0.9 / 5) * 5,
+    target_s1: Math.ceil(set3Weight * 0.8 / 5) * 5
+  };
+}
+
+// Returns the rep floor for a given set (goal * 0.8, rounded up)
+function repFloor(goalReps) {
+  return Math.ceil(goalReps * 0.8);
+}
+
+// Called after all 3 sets of an exercise are logged.
+// setsData: [{reps, skipped}, {reps, skipped}, {reps, skipped}] (index 0 = set1)
+async function runProgressionEngine(ex, setsData) {
+  if (ex.is_optional) return;           // finishers never feed progression
+  if (ex.is_bodyweight) return;         // no weight to advance
+  if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
+
+  var state = ex.state;
+  var goalReps = ex.goal_reps;
+  var floor = repFloor(goalReps);
+  var ceiling = goalReps + 5;
+
+  // Any skipped set, or form hold on set 3 = don't advance, don't count as stall
+  var hasSkip = setsData.some(function(s) { return s.skipped; });
+  var hasFormHold = setsData.some(function(s) { return s.formHold; });
+  if (hasSkip || hasFormHold) return;
+
+  // All reps must be actual (no nulls)
+  var reps = setsData.map(function(s) { return s.reps; });
+  if (reps.some(function(r) { return r == null; })) return;
+
+  var s1w = state.set1_weight, s2w = state.set2_weight, s3w = state.set3_weight;
+  var progState = state.progression_state;
+  var failures  = state.consecutive_failures || 0;
+
+  var variant = progressionVariant(s3w);
+
+  // Which set are we evaluating for success?
+  // 'ready'         → check set3 reps
+  // 'catch_up_set2' → check set2 reps
+  // 'catch_up_set1' → check set1 reps
+  var evalSetIdx = (progState === 'ready') ? 2 : (progState === 'catch_up_set2') ? 1 : 0;
+  var evalReps = reps[evalSetIdx];
+
+  // Success = hit at least goal reps on the evaluated set
+  var success = evalReps >= goalReps;
+  // Stall = under floor
+  var underFloor = evalReps < floor;
+
+  var patch = {};
+
+  if (underFloor) {
+    // Count consecutive failures — stall on 2nd
+    failures += 1;
+    patch.consecutive_failures = failures;
+    if (failures >= 2) {
+      // Deload: set3 -10%, round to nearest 5
+      var newS3 = Math.round((s3w * 0.9) / 5) * 5;
+      // Recompute set2/set1 targets after deload
+      var deloadedTargets = classicTargets(newS3);
+      patch.set3_weight = newS3;
+      // Reset to catch_up_set2 so we work back up
+      patch.progression_state = 'catch_up_set2';
+      // Set2 may now be above or below new target; set to min of current and target
+      patch.set2_weight = Math.min(s2w, deloadedTargets.target_s2);
+      patch.set1_weight = Math.min(s1w, deloadedTargets.target_s1);
+      patch.consecutive_failures = 0;
+    }
+  } else if (success) {
+    failures = 0;
+    patch.consecutive_failures = 0;
+
+    if (variant === 'rep_ladder') {
+      // Rep-ladder: all sets same weight; on success just stay ready
+      // (weight advances are manual for rep-ladder mode — keep as-is,
+      //  rep-ladder progression is rep-based not weight-based)
+      patch.progression_state = 'ready';
+    } else {
+      // Classic catch-up state machine
+      if (progState === 'ready') {
+        // Set3 succeeded — advance set3 by 5, enter catch_up_set2
+        patch.set3_weight = s3w + 5;
+        patch.progression_state = 'catch_up_set2';
+      } else if (progState === 'catch_up_set2') {
+        // Set2 caught up — now check if it needs to keep catching up
+        var targets2 = classicTargets(s3w);
+        if (s2w < targets2.target_s2) {
+          // Advance set2 by 5
+          patch.set2_weight = Math.min(s2w + 5, targets2.target_s2);
+          // If set2 is now at target, move to catch_up_set1
+          if (patch.set2_weight >= targets2.target_s2) {
+            patch.progression_state = 'catch_up_set1';
+          }
+        } else {
+          // Set2 already at target
+          patch.progression_state = 'catch_up_set1';
+        }
+      } else if (progState === 'catch_up_set1') {
+        var targets1 = classicTargets(s3w);
+        if (s1w < targets1.target_s1) {
+          patch.set1_weight = Math.min(s1w + 5, targets1.target_s1);
+          if (patch.set1_weight >= targets1.target_s1) {
+            patch.progression_state = 'ready';
+          }
+        } else {
+          patch.progression_state = 'ready';
+        }
+      }
+    }
+  } else {
+    // Between floor and goal — partial. Reset failure counter (not a stall).
+    patch.consecutive_failures = 0;
+  }
+
+  if (Object.keys(patch).length > 0) {
+    await updateExerciseState(ex.id, patch);
+    Object.assign(ex.state, patch);
+  }
+}
+
+// Returns a human-readable progression hint for the workout screen
+function progressionHint(ex) {
+  if (ex.is_bodyweight || ex.is_optional) return '';
+  var st = ex.state;
+  if (!st) return '';
+  var variant = progressionVariant(st.set3_weight);
+
+  if (variant === 'rep_ladder') {
+    return 'Hit ' + ex.goal_reps + ' reps → you\'ll progress to next weight';
+  }
+  if (st.progression_state === 'ready') {
+    return 'Hit ' + ex.goal_reps + ' reps on all 3 → Set 3 advances to ' + (st.set3_weight + 5) + ' lbs';
+  }
+  if (st.progression_state === 'catch_up_set2') {
+    var t = classicTargets(st.set3_weight);
+    return 'Catching up Set 2 → target ' + t.target_s2 + ' lbs';
+  }
+  if (st.progression_state === 'catch_up_set1') {
+    var t2 = classicTargets(st.set3_weight);
+    return 'Catching up Set 1 → target ' + t2.target_s1 + ' lbs';
+  }
+  return '';
+}
+
+// =============================================================
+// REHAB CURSOR + CYCLE EVALUATION
+// =============================================================
+
+async function advanceCycleDay() {
+  var ps = APP.planState;
+  var pc = APP.planConfig;
+  var day = ps.current_cycle_day;
+
+  if (day < 8) {
+    await updatePlanState({ current_cycle_day: day + 1 });
+  } else {
+    // Rolling 8→1: evaluate the completed cycle
+    var clean = ps.current_cycle_clean &&
+                ps.current_cycle_rest_days <= pc.max_rest_days_per_cycle;
+
+    var patch = {
+      current_cycle_day:   1,
+      current_cycle_clean: true,
+      current_cycle_rest_days: 0
+    };
+
+    if (clean) {
+      var newClean = ps.clean_cycles_completed + 1;
+      patch.clean_cycles_completed = newClean;
+      patch.phase_flare_count = 0;
+      // Phase advance check
+      if (newClean >= pc.clean_cycles_required && ps.current_phase < 3) {
+        patch.current_phase = ps.current_phase + 1;
+        patch.clean_cycles_completed = 0;
+        // Reload the plan for the new phase/day
+      }
+    } else {
+      patch.clean_cycles_completed = 0;
+      // Stay in phase
+    }
+
+    await updatePlanState(patch);
+
+    // Reload today plan for new cursor position
+    var newPhase = APP.planState.current_phase;
+    var newDayNum = (newPhase - 1) * 8 + 1;
+    var planRes = await db.from('cycle_plan').select('*').eq('day_number', newDayNum).single();
+    if (!planRes.error) APP.todayPlan = planRes.data;
+  }
+}
+
+// =============================================================
+// FLARE + DELOAD STATE MACHINE
+// =============================================================
+
+async function evaluateFlare(painLevel, jointFullness) {
+  var pc = APP.planConfig;
+  var ps = APP.planState;
+
+  var isFlare = painLevel >= pc.pain_dirty_threshold || jointFullness === true;
+  if (!isFlare) {
+    // Check for deload exit
+    if (ps.in_deload) {
+      var daysSinceDeload = 0;
+      if (ps.deload_started_on) {
+        var msPerDay = 86400000;
+        daysSinceDeload = Math.floor(
+          (new Date(APP.today) - new Date(ps.deload_started_on)) / msPerDay
+        );
+      }
+      var canExit = painLevel <= 3 && !jointFullness &&
+                    daysSinceDeload >= pc.flare_min_rest_days;
+      if (canExit) {
+        await updatePlanState({ in_deload: false, deload_started_on: null });
+      }
+    }
+    return;
+  }
+
+  // It's a flare
+  var patch = {
+    current_cycle_clean: false,
+    phase_flare_count:   ps.phase_flare_count + 1
+  };
+
+  if (!ps.in_deload) {
+    patch.in_deload = true;
+    patch.deload_started_on = APP.today;
+  }
+
+  // Check regression: Nth flare in phase (>= flares_before_regress) and not already in phase 1
+  if (patch.phase_flare_count >= pc.flares_before_regress && ps.current_phase > 1) {
+    patch.current_phase          = ps.current_phase - 1;
+    patch.current_cycle_day      = 1;
+    patch.clean_cycles_completed = 0;
+    patch.phase_flare_count      = 0;
+    patch.current_cycle_clean    = true;
+    patch.current_cycle_rest_days = 0;
+    patch.in_deload              = true;
+    patch.deload_started_on      = APP.today;
+  }
+
+  await updatePlanState(patch);
+
+  // Reload plan for potentially new phase/day
+  var dayNum = (APP.planState.current_phase - 1) * 8 + APP.planState.current_cycle_day;
+  var planRes = await db.from('cycle_plan').select('*').eq('day_number', dayNum).single();
+  if (!planRes.error) APP.todayPlan = planRes.data;
+}
+
+// Also called when a niggle-skip is logged during a workout
+async function markNiggleFlare() {
+  var ps = APP.planState;
+  if (ps.current_cycle_clean) {
+    await updatePlanState({ current_cycle_clean: false });
+  }
+}
+
+// =============================================================
+// RENDER ENGINE
+// =============================================================
+
+function render() {
+  clearInterval(APP.timerInterval);
+  APP.timerInterval = null;
+
+  var html = '';
+  switch (APP.screen) {
+    case 'today':    html = rToday(); break;
+    case 'checkin':  html = rCheckin(); break;
+    case 'workout':  html = rWorkout(); break;
+    case 'log_set':  html = rLogSet(); break;
+    case 'rest':     html = rRest(); break;
+    default:         html = rToday();
+  }
+
+  document.getElementById('screen').innerHTML = html;
+
+  if (APP.screen === 'rest' && APP.timerActive) {
+    APP.timerInterval = setInterval(function() {
+      APP.timerRemaining--;
+      var el = document.getElementById('tn');
+      if (el) el.textContent = fmt(APP.timerRemaining);
+      if (APP.timerRemaining <= 0) {
+        clearInterval(APP.timerInterval);
+        APP.timerInterval = null;
+        APP.timerActive = false;
+        playTimerDone();
+        APP.pendingSet = APP.pendingSet + 1;
+        APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
+        APP.screen = 'log_set';
+        render();
+      }
+    }, 1000);
+  }
+}
+
+// =============================================================
+// TODAY SCREEN
+// =============================================================
+
+function rToday() {
+  var ps  = APP.planState;
+  var tp  = APP.todayPlan;
+  var cfg = APP.planConfig;
+
+  var dateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+  // Phase + cycle badge
+  var badge = 'Phase ' + ps.current_phase + ' · Day ' + ps.current_cycle_day;
+  var badgeStyle = 'font-size:12px;padding:4px 12px;border-radius:var(--radius-md);background:var(--color-bg-info);color:var(--color-text-info);font-weight:500';
+
+  var html = '<div style="padding-top:16px">'
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:2px">' + dateStr + '</p>'
+    + '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px">'
+    + '<h1 style="font-size:26px">Today</h1>'
+    + '<span style="' + badgeStyle + '">' + badge + '</span>'
+    + '</div>';
+
+  // Deload banner
+  if (ps.in_deload) {
+    var deloadMsg = 'Deload mode — cap run at ' + cfg.deload_run_mile_cap + ' mi, freeze lifts, skip plyometrics. Keep isometrics &amp; mobility.';
+    html += '<div class="deload-banner"><i class="ti ti-alert-triangle" style="margin-right:6px"></i>' + deloadMsg + '</div>';
+  }
+
+  // Check-in strip
+  html += rCheckinStrip();
+
+  // Readiness badge (only if checked in)
+  if (APP.todayLog && APP.readiness) {
+    html += rReadinessBadge();
+  }
+
+  html += '<div style="height:14px"></div>';
+
+  // Rehab card helpers (used below, possibly before or after run/lift)
+  var rehabLabel = tp.rehab_exercise;
+  var rehabTiming = tp.rehab_timing.replace(/_/g, ' ');
+  var suppressedPlyo = ps.in_deload && cfg.deload_suppress_plyo &&
+    rehabLabel.toLowerCase().indexOf('plyo') !== -1;
+  if (suppressedPlyo) {
+    rehabLabel = '5×45s Isometric Knee Pre-Load (plyo suppressed)';
+  }
+  var rehabLogged = APP.todayLog && APP.todayLog.rehab_completed;
+  var rehabCard = actCard('ti-activity', 'var(--color-bg-warning)', 'var(--color-text-warning)',
+    'Rehab · ' + rehabTiming, rehabLabel, null, 'toggleRehab()', rehabLogged);
+
+  var rehabBefore = tp.rehab_timing.indexOf('before') === 0;
+
+  // Rehab first if it comes before run/lift
+  if (rehabBefore) html += rehabCard;
+
+  // Run card (if today has a run)
+  if (tp.run_miles !== null) {
+    var runMiles = (ps.in_deload && tp.run_miles > cfg.deload_run_mile_cap)
+      ? cfg.deload_run_mile_cap
+      : tp.run_miles;
+    var runLabel = runMiles + ' miles';
+    if (tp.run_notes) runLabel += ' — ' + tp.run_notes;
+    var runLogged = APP.todayLog && APP.todayLog.run_completed;
+    html += actCard('ti-run', 'var(--color-bg-info)', 'var(--color-text-info)', 'Run', runLabel,
+      tp.target_cadence ? tp.target_cadence + ' spm target' : null, 'toggleRun()', runLogged);
+  }
+
+  // Lift card (if today is a lift day)
+  if (tp.is_lift_day) {
+    var liftNames = APP.exercises
+      .filter(function(e) { return !e.is_optional; })
+      .map(function(e) { return e.name; });
+    html += rLiftCard(ps.current_gym_day, liftNames);
+  }
+
+  // Rehab after run/lift if timing is after
+  if (!rehabBefore) html += rehabCard;
+
+  // Progress summary
+  html += rProgressSummary();
+
+  html += '</div>';
+  return html;
+}
+
+function rCheckinStrip() {
+  if (APP.todayLog) {
+    var pain = APP.todayLog.knee_pain_level;
+    var swell = APP.todayLog.joint_fullness;
+    var col = pain >= 4 ? 'var(--color-text-danger)' : pain === 3 ? 'var(--color-text-warning)' : 'var(--color-text-success)';
+    return '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--color-bg-secondary);border-radius:var(--radius-md);margin-bottom:8px;cursor:pointer" onclick="goCheckin()">'
+      + '<i class="ti ti-clipboard-check" style="font-size:18px;color:' + col + ';flex-shrink:0"></i>'
+      + '<div style="flex:1">'
+      + '<p style="font-size:13px;font-weight:500">Morning check-in done</p>'
+      + '<p style="font-size:12px;color:var(--color-text-secondary)">Pain ' + pain + '/5' + (swell ? ' · Swelling noted' : '') + '</p>'
+      + '</div>'
+      + '<i class="ti ti-pencil" style="font-size:15px;color:var(--color-text-tertiary)"></i>'
+      + '</div>';
+  }
+  return '<button onclick="goCheckin()" style="width:100%;padding:14px 16px;background:var(--color-bg-warning);border:0.5px solid var(--color-text-warning);border-radius:var(--radius-md);margin-bottom:8px;display:flex;align-items:center;gap:10px;text-align:left">'
+    + '<i class="ti ti-clipboard" style="font-size:18px;color:var(--color-text-warning);flex-shrink:0"></i>'
+    + '<div>'
+    + '<p style="font-size:13px;font-weight:500;color:var(--color-text-warning)">Morning check-in</p>'
+    + '<p style="font-size:12px;color:var(--color-text-warning);opacity:0.8">Knee pain + swelling → takes 30 seconds</p>'
+    + '</div>'
+    + '</button>';
+}
+
+function rReadinessBadge() {
+  var r = APP.readiness;
+  var cls = 'readiness-' + r;
+  var icon = r === 'green' ? 'ti-circle-check' : r === 'amber' ? 'ti-alert-triangle' : 'ti-circle-x';
+  var msg = r === 'green' ? 'Good to go' : r === 'amber' ? 'Hold loads flat today' : 'Regress — keep it easy';
+  return '<div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:var(--radius-md);margin-bottom:4px" class="' + cls + '">'
+    + '<i class="ti ' + icon + '" style="font-size:16px;flex-shrink:0"></i>'
+    + '<p style="font-size:13px;font-weight:500">' + msg + '</p>'
+    + '</div>';
+}
+
+function actCard(icon, bg, col, label, val, subval, onclick, checked) {
+  var checkBtn = checked
+    ? '<div style="width:36px;height:36px;border-radius:50%;background:var(--color-text);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-check" style="font-size:18px;color:var(--color-bg)"></i></div>'
+    : '<button onclick="' + onclick + '" style="width:36px;height:36px;border-radius:50%;border:0.5px solid var(--color-border-md);background:transparent;display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--color-text-secondary)" aria-label="Mark complete"><i class="ti ti-check" aria-hidden="true"></i></button>';
+  return '<div style="background:var(--color-bg);border:0.5px solid var(--color-border);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;gap:12px' + (checked ? ';opacity:0.65' : '') + '">'
+    + '<div style="width:40px;height:40px;border-radius:50%;background:' + bg + ';display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+    + '<i class="ti ' + icon + '" style="font-size:20px;color:' + col + '" aria-hidden="true"></i></div>'
+    + '<div style="flex:1">'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">' + label + '</p>'
+    + '<p style="font-size:16px;font-weight:500">' + val + '</p>'
+    + (subval ? '<p style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">' + subval + '</p>' : '')
+    + '</div>'
+    + checkBtn
+    + '</div>';
+}
+
+function rLiftCard(gymDay, exerciseNames) {
+  var done = APP.liftCompletedToday;
+  var checkBtn = done
+    ? '<div style="width:36px;height:36px;border-radius:50%;background:var(--color-text);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-check" style="font-size:18px;color:var(--color-bg)"></i></div>'
+    : '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--color-text-tertiary)"></i>';
+  return '<div style="background:var(--color-bg);border:0.5px solid ' + (done ? 'var(--color-text-success)' : 'var(--color-border)') + ';border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;cursor:pointer' + (done ? ';opacity:0.65' : '') + '" onclick="' + (done ? '' : 'startWorkout()') + '">'
+    + '<div style="display:flex;align-items:center;gap:12px">'
+    + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-success);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+    + '<i class="ti ti-barbell" style="font-size:20px;color:var(--color-text-success)"></i></div>'
+    + '<div style="flex:1">'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">Lift</p>'
+    + '<p style="font-size:16px;font-weight:500">Day ' + gymDay + ' workout</p></div>'
+    + checkBtn + '</div>'
+    + '<div style="border-top:0.5px solid var(--color-border);margin-top:12px;padding-top:10px;display:flex;gap:6px;flex-wrap:wrap">'
+    + exerciseNames.map(function(n) {
+      return '<span style="font-size:11px;padding:3px 10px;border-radius:20px;border:0.5px solid var(--color-border);color:var(--color-text-secondary)">' + n + '</span>';
+    }).join('')
+    + '</div></div>';
+}
+
+function rProgressSummary() {
+  var ps = APP.planState;
+  var pc = APP.planConfig;
+  var phasePct = Math.round((ps.clean_cycles_completed / pc.clean_cycles_required) * 100);
+
+  return '<div style="margin-top:20px;padding:16px;background:var(--color-bg-secondary);border-radius:var(--radius-lg)">'
+    + '<p style="font-size:13px;font-weight:500;margin-bottom:12px">Progress</p>'
+    + '<div style="display:flex;gap:12px">'
+    + rStatBox('Phase', ps.current_phase + ' / 3', '')
+    + rStatBox('Clean cycles', ps.clean_cycles_completed + ' / ' + pc.clean_cycles_required, '')
+    + rStatBox('Cycle day', ps.current_cycle_day + ' / 8', '')
+    + '</div>'
+    + (phasePct > 0 ? '<div style="margin-top:12px"><div style="height:4px;background:var(--color-bg-tertiary);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + Math.min(phasePct, 100) + '%;background:var(--color-text-success);border-radius:2px"></div></div><p style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">' + phasePct + '% toward phase advance</p></div>' : '')
+    + '</div>';
+}
+
+function rStatBox(label, val) {
+  return '<div style="flex:1;text-align:center;padding:10px 6px;background:var(--color-bg);border-radius:var(--radius-md);border:0.5px solid var(--color-border)">'
+    + '<p style="font-size:18px;font-weight:500">' + val + '</p>'
+    + '<p style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' + label + '</p>'
+    + '</div>';
+}
+
+// =============================================================
+// CHECK-IN SCREEN
+// =============================================================
+
+function rCheckin() {
+  var existing = APP.todayLog;
+  var pain = APP.ciPain !== null ? APP.ciPain : (existing ? existing.knee_pain_level : null);
+  var swell = APP.ciSwelling !== false ? APP.ciSwelling : (existing ? !!existing.joint_fullness : false);
+
+  var descriptors = [
+    '1 — Noticed at most, no effect, gone by morning',
+    '2 — Mild, some awareness but no effect on movement',
+    '3 — Felt during/after, settled within 24h',
+    '4 — Changed how you moved or ran',
+    '5 — Lingered to this morning'
+  ];
+
+  var html = '<div style="padding-top:12px">'
+    + '<button onclick="APP.screen=\'today\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:20px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
+    + '<h1 style="font-size:24px;margin-bottom:4px">Morning check-in</h1>'
+    + '<p style="font-size:14px;color:var(--color-text-secondary);margin-bottom:24px">How\'s the knee since yesterday?</p>'
+
+    // Pain selector
+    + '<p style="font-size:13px;font-weight:500;margin-bottom:10px">Knee pain level</p>'
+    + '<div style="display:flex;gap:6px;margin-bottom:12px">'
+    + [1,2,3,4,5].map(function(n) {
+      var sel = pain === n ? ' selected' : '';
+      return '<button class="pain-btn' + sel + '" onclick="selectPain(' + n + ')">' + n + '</button>';
+    }).join('')
+    + '</div>';
+
+  // Descriptor for selected pain
+  if (pain !== null) {
+    html += '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:20px;padding:8px 12px;background:var(--color-bg-secondary);border-radius:var(--radius-md)">'
+      + descriptors[pain - 1] + '</p>';
+  } else {
+    html += '<div style="height:20px"></div>';
+  }
+
+  // Swelling toggle
+  html += '<p style="font-size:13px;font-weight:500;margin-bottom:8px">Patellar sweep test</p>'
+    + '<button onclick="toggleSwelling()" style="width:100%;padding:16px;border-radius:var(--radius-lg);border:0.5px solid ' + (swell ? 'var(--color-text-danger)' : 'var(--color-border-md)') + ';background:' + (swell ? 'var(--color-bg-danger)' : 'var(--color-bg-secondary)') + ';font-size:15px;text-align:left;display:flex;align-items:center;gap:10px;margin-bottom:24px">'
+    + '<i class="ti ' + (swell ? 'ti-droplet-filled' : 'ti-droplet') + '" style="font-size:20px;color:' + (swell ? 'var(--color-text-danger)' : 'var(--color-text-secondary)') + '"></i>'
+    + '<div><p style="font-size:14px;font-weight:500;color:' + (swell ? 'var(--color-text-danger)' : 'var(--color-text)') + '">' + (swell ? 'Swelling present' : 'No swelling') + '</p>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">Fluid wave when you press alongside the kneecap?</p></div>'
+    + '</button>';
+
+  // Save button
+  var canSave = pain !== null;
+  html += '<button onclick="saveCheckin()" ' + (canSave ? '' : 'disabled') + ' style="width:100%;padding:18px;background:' + (canSave ? 'var(--color-text)' : 'var(--color-bg-tertiary)') + ';color:' + (canSave ? 'var(--color-bg)' : 'var(--color-text-tertiary)') + ';border:none;border-radius:var(--radius-lg);font-size:16px;font-weight:500;' + (canSave ? '' : 'cursor:not-allowed') + '">Save check-in</button>'
+    + '</div>';
+
+  return html;
+}
+
+// =============================================================
+// WORKOUT SCREEN
+// =============================================================
+
+function rWorkout() {
+  var ps = APP.planState;
+  var exercises = APP.exercises;
+  var mainExercises = exercises.filter(function(e) { return !e.is_optional; });
+  var finishers    = exercises.filter(function(e) { return e.is_optional; });
+
+  // Group by day_order for superset display
+  var byOrder = {};
+  mainExercises.forEach(function(e) {
+    if (!byOrder[e.day_order]) byOrder[e.day_order] = [];
+    byOrder[e.day_order].push(e);
+  });
+
+  var html = '<div style="padding-top:12px">'
+    + '<button onclick="APP.screen=\'today\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:16px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>';
+
+  if (ps.in_deload) {
+    html += '<div class="deload-banner" style="margin-bottom:14px"><i class="ti ti-alert-triangle" style="margin-right:6px"></i>Deload mode — loads frozen, no plyometrics</div>';
+  }
+
+  html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px">'
+    + '<span style="font-size:13px;color:var(--color-text-secondary)">Day ' + APP.planState.current_gym_day + ' workout</span>'
+    + '<span style="font-size:13px;color:var(--color-text-secondary)">Phase ' + ps.current_phase + '</span></div>'
+    + '<h1 style="font-size:24px;margin-bottom:20px">Exercises</h1>';
+
+  // Render each exercise group
+  var globalIdx = 0;
+  Object.keys(byOrder).sort(function(a,b){ return a-b; }).forEach(function(order) {
+    var group = byOrder[order];
+    var isSuperset = group.length > 1;
+
+    if (isSuperset) {
+      html += rSupersetGroup(group, globalIdx);
+      globalIdx += group.length;
+    } else {
+      html += rExerciseRow(group[0], globalIdx, mainExercises.length);
+      globalIdx++;
+    }
+  });
+
+  // Finishers section
+  if (finishers.length > 0) {
+    html += '<p style="font-size:12px;color:var(--color-text-tertiary);text-transform:uppercase;letter-spacing:0.06em;margin-top:20px;margin-bottom:10px">Optional finishers</p>';
+    finishers.forEach(function(ex, i) {
+      html += rExerciseRow(ex, mainExercises.length + i, exercises.length);
+    });
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function rExerciseRow(ex, idx, total) {
+  var st = ex.state;
+  var isActive = (idx === APP.exIndex);
+  var isDone   = (idx < APP.exIndex) || (idx === APP.exIndex && APP.setLogged[0] && APP.setLogged[1] && APP.setLogged[2]);
+  var isPending = idx > APP.exIndex;
+
+  var bg   = isDone   ? 'var(--color-bg-success)'   : isActive ? 'var(--color-bg-secondary)' : 'var(--color-bg)';
+  var bdr  = isDone   ? 'var(--color-text-success)'  : isActive ? 'var(--color-border-md)'    : 'var(--color-border)';
+  var opa  = isPending ? ';opacity:0.45' : '';
+
+  var weights = ex.is_bodyweight ? null : [st.set1_weight, st.set2_weight, st.set3_weight];
+  var weightStr = weights ? weights.join(' / ') + ' lbs' : 'Bodyweight';
+
+  var hint = progressionHint(ex);
+
+  var html = '<div style="background:' + bg + ';border:0.5px solid ' + bdr + ';border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:8px' + opa + '" onclick="' + (isActive ? 'goLogSet(0,' + idx + ')' : '') + '">'
+    + '<div style="display:flex;align-items:center;gap:12px">'
+    + '<div style="flex:1">'
+    + '<p style="font-size:11px;color:var(--color-text-secondary);margin-bottom:2px">Exercise ' + (idx+1) + ' of ' + total + (ex.is_optional ? ' · optional' : '') + '</p>'
+    + '<p style="font-size:16px;font-weight:500">' + ex.name + '</p>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-top:3px">' + weightStr + ' · 3×' + ex.goal_reps + ' reps</p>'
+    + '</div>';
+
+  if (isDone) {
+    html += '<i class="ti ti-circle-check" style="font-size:24px;color:var(--color-text-success);flex-shrink:0"></i>';
+  } else if (isActive) {
+    html += '<button onclick="event.stopPropagation();goLogSet(0,' + idx + ')" style="padding:10px 18px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:14px;font-weight:500;flex-shrink:0">Start</button>';
+  }
+
+  html += '</div>';
+
+  if (ex.form_cue && isActive) {
+    html += '<div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--color-border);font-size:12px;color:var(--color-text-secondary)">'
+      + '<i class="ti ti-bulb" style="font-size:12px;margin-right:4px"></i>' + ex.form_cue + '</div>';
+  }
+
+  if (hint && isActive) {
+    html += '<div style="margin-top:6px;font-size:11px;color:var(--color-text-tertiary)">'
+      + '<i class="ti ti-trending-up" style="font-size:11px;margin-right:4px"></i>' + hint + '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function rSupersetGroup(group, startIdx) {
+  var anchor = group.find(function(e) { return e.is_superset_anchor; }) || group[0];
+  var anchorWeight = anchor.state.set1_weight; // sets share weight in superset
+
+  var html = '<div style="border:0.5px solid var(--color-border-md);border-radius:var(--radius-lg);padding:12px;margin-bottom:8px;background:var(--color-bg-secondary)">'
+    + '<p style="font-size:11px;color:var(--color-text-secondary);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">Superset · ' + anchorWeight + ' lbs</p>';
+
+  group.forEach(function(ex, i) {
+    html += '<div style="padding:8px 0;' + (i < group.length-1 ? 'border-bottom:0.5px solid var(--color-border)' : '') + '">'
+      + '<p style="font-size:15px;font-weight:500">' + ex.name + '</p>'
+      + '<p style="font-size:12px;color:var(--color-text-secondary)">' + ex.goal_reps + ' reps</p>'
+      + '</div>';
+  });
+
+  // Use anchor exercise for the log button
+  html += '<button onclick="goLogSet(0,' + startIdx + ')" style="width:100%;margin-top:10px;padding:12px;background:var(--color-text);color:var(--color-bg);border:none;border-radius:var(--radius-md);font-size:14px;font-weight:500">Start superset</button>';
+  html += '</div>';
+  return html;
+}
+
+// =============================================================
+// LOG SET SCREEN
+// =============================================================
+
+function rLogSet() {
+  var ex = APP.exercises[APP.exIndex];
+  var setIdx = APP.pendingSet; // 0-based
+  var st = ex.state;
+  var weight = ex.is_bodyweight ? null :
+    [st.set1_weight, st.set2_weight, st.set3_weight][setIdx];
+  var restLabel = setIdx === 0 ? '60s' : '3 min';
+
+  // Already logged sets mini-summary
+  var doneHtml = '';
+  for (var i = 0; i < setIdx; i++) {
+    if (APP.setLogged[i]) {
+      var lr = APP.loggedSkipped[i]
+        ? '<span style="color:var(--color-text-secondary)">skipped</span>'
+        : APP.loggedReps[i] + ' reps';
+      doneHtml += '<p style="font-size:13px;color:var(--color-text-success);margin-bottom:4px"><i class="ti ti-check"></i> Set ' + (i+1) + ' · ' + lr + '</p>';
+    }
+  }
+
+  var html = '<div style="padding-top:12px">'
+    + '<button onclick="APP.screen=\'workout\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:20px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
+    + (doneHtml ? '<div style="margin-bottom:16px">' + doneHtml + '</div>' : '')
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:2px">Set ' + (setIdx+1) + ' of 3 · ' + ex.name + '</p>'
+    + '<h1 style="font-size:26px;margin-bottom:28px">' + (weight ? weight + ' lbs' : 'Bodyweight') + '</h1>'
+    + '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:36px 20px;text-align:center;margin-bottom:28px">'
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:8px">Reps</p>'
+    + '<div id="rn" style="font-size:64px;font-weight:500;line-height:1;margin-bottom:20px">' + APP.pendingReps + '</div>'
+    + '<div style="display:flex;justify-content:center;align-items:center;gap:24px">'
+    + '<button onclick="adj(-1)" style="width:48px;height:48px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:22px;display:flex;align-items:center;justify-content:center" aria-label="fewer reps"><i class="ti ti-minus"></i></button>'
+    + '<span style="font-size:12px;color:var(--color-text-tertiary)">adjust</span>'
+    + '<button onclick="adj(1)" style="width:48px;height:48px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:22px;display:flex;align-items:center;justify-content:center" aria-label="more reps"><i class="ti ti-plus"></i></button>'
+    + '</div></div>'
+    + '<button onclick="doLogSet()" id="lb" style="width:100%;padding:20px;background:var(--color-text);color:var(--color-bg);border:none;border-radius:var(--radius-lg);font-size:18px;font-weight:500;margin-bottom:10px">Done · ' + APP.pendingReps + ' reps</button>'
+    + (setIdx < 2 ? '<p style="text-align:center;font-size:12px;color:var(--color-text-tertiary)">→ ' + restLabel + ' rest starts after</p>' : '')
+    + (setIdx === 2 && !ex.is_optional && !ex.is_bodyweight
+      ? '<button onclick="toggleFormHold()" style="width:100%;padding:14px;border-radius:var(--radius-md);border:0.5px solid ' + (APP.formHold ? 'var(--color-text-warning)' : 'var(--color-border)') + ';background:' + (APP.formHold ? 'var(--color-bg-warning)' : 'transparent') + ';color:' + (APP.formHold ? 'var(--color-text-warning)' : 'var(--color-text-secondary)') + ';font-size:14px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px">'
+        + '<i class="ti ti-shield-pause" style="font-size:16px"></i>'
+        + (APP.formHold ? 'Hold progression — form needs more work' : 'Hold progression (form not ready)')
+        + '</button>'
+      : '')
+    + '<button onclick="showSkipMenu()" style="width:100%;padding:12px;background:transparent;border:none;color:var(--color-text-secondary);font-size:14px;margin-top:8px">Skip this set…</button>'
+    + '</div>';
+
+  return html;
+}
+
+// =============================================================
+// REST TIMER SCREEN
+// =============================================================
+
+function rRest() {
+  var ex = APP.exercises[APP.exIndex];
+  var setIdx = APP.pendingSet;
+  var nextSetIdx = setIdx + 1;
+  var st = ex.state;
+  var nextWeight = ex.is_bodyweight ? null :
+    [st.set1_weight, st.set2_weight, st.set3_weight][nextSetIdx];
+
+  var html = '<div style="padding-top:12px">'
+    + '<button onclick="skipRest()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:12px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
+    + (APP.loggedSkipped[setIdx]
+       ? '<p style="font-size:14px;color:var(--color-text-secondary);margin-bottom:4px"><i class="ti ti-forward-skip"></i> Set ' + (setIdx+1) + ' skipped</p>'
+       : '<p style="font-size:14px;color:var(--color-text-success);margin-bottom:4px"><i class="ti ti-check"></i> Set ' + (setIdx+1) + ' done · ' + APP.loggedReps[setIdx] + ' reps</p>'
+      )
+    + '<div style="text-align:center;padding:48px 20px 36px">'
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:8px">' + (setIdx === 0 ? 'Short rest' : 'Full rest') + '</p>'
+    + '<div id="tn" style="font-size:60px;font-weight:500;letter-spacing:-2px;line-height:1">' + fmt(APP.timerRemaining) + '</div>'
+    + '<p style="font-size:13px;color:var(--color-text-tertiary);margin-top:12px">until set ' + (nextSetIdx+1) + '</p>'
+    + '</div>'
+    + '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:18px;text-align:center;margin-bottom:20px">'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px">Next — Set ' + (nextSetIdx+1) + '</p>'
+    + '<p style="font-size:24px;font-weight:500">'
+    + (nextWeight ? nextWeight + ' lbs' : 'Bodyweight')
+    + ' <span style="font-size:15px;font-weight:400;color:var(--color-text-secondary)">· ' + ex.goal_reps + ' reps</span></p>'
+    + '</div>'
+    + '<button onclick="skipRest()" style="width:100%;padding:12px;background:transparent;border:0.5px solid var(--color-border-md);border-radius:var(--radius-md);font-size:14px;color:var(--color-text-secondary)">Skip rest</button>'
+    + '</div>';
+
+  return html;
+}
+
+// =============================================================
+// ACTIONS
+// =============================================================
+
+function goCheckin() {
+  // Pre-populate form if already checked in today
+  if (APP.todayLog) {
+    APP.ciPain    = APP.todayLog.knee_pain_level;
+    APP.ciSwelling = !!APP.todayLog.joint_fullness;
+  } else {
+    APP.ciPain    = null;
+    APP.ciSwelling = false;
+  }
+  APP.screen = 'checkin';
+  render();
+}
+
+function selectPain(n) {
+  APP.ciPain = n;
+  render();
+}
+
+function toggleSwelling() {
+  APP.ciSwelling = !APP.ciSwelling;
+  render();
+}
+
+async function saveCheckin() {
+  if (APP.ciPain === null) return;
+  try {
+    await saveDailyLog(APP.ciPain, APP.ciSwelling);
+    await evaluateFlare(APP.ciPain, APP.ciSwelling);
+    await refreshReadiness();
+    APP.screen = 'today';
+    render();
+  } catch (e) {
+    alert('Save failed: ' + e.message);
+  }
+}
+
+async function startWorkout() {
+  if (!APP.sessionId) {
+    try {
+      await createSession(APP.planState.current_gym_day);
+    } catch (e) {
+      alert('Could not start session: ' + e.message);
+      return;
+    }
+  }
+  APP.exIndex    = 0;
+  APP.setLogged  = [false, false, false];
+  APP.loggedReps = [null, null, null];
+  APP.loggedSkipped = [false, false, false];
+  APP.skipReasons   = [null, null, null];
+  APP.formHold      = false;
+  APP.screen = 'workout';
+  render();
+}
+
+function goLogSet(setIdx, exIdx) {
+  APP.exIndex    = exIdx;
+  APP.pendingSet = setIdx;
+  APP.pendingReps = APP.exercises[exIdx].goal_reps;
+  APP.screen = 'log_set';
+  render();
+}
+
+function adj(d) {
+  APP.pendingReps = Math.max(1, APP.pendingReps + d);
+  var e = document.getElementById('rn');
+  if (e) e.textContent = APP.pendingReps;
+  var b = document.getElementById('lb');
+  if (b) b.textContent = 'Done · ' + APP.pendingReps + ' reps';
+}
+
+async function doLogSet() {
+  var ex = APP.exercises[APP.exIndex];
+  var setIdx = APP.pendingSet;
+  var st = ex.state;
+  var weight = [st.set1_weight, st.set2_weight, st.set3_weight][setIdx];
+
+  APP.setLogged[setIdx]  = true;
+  APP.loggedReps[setIdx] = APP.pendingReps;
+  APP.loggedSkipped[setIdx] = false;
+
+  try {
+    await logSessionSet(ex.id, setIdx+1, weight, ex.goal_reps, APP.pendingReps, ex.is_bodyweight, 'completed', null);
+  } catch(e) {
+    console.error('Log set error:', e);
+  }
+
+  if (setIdx < 2) {
+    // Start rest timer
+    APP.timerRemaining = setIdx === 0 ? (ex.rest_short_seconds || 60) : (ex.rest_long_seconds || 180);
+    APP.timerActive = true;
+    APP.screen = 'rest';
+    render();
+  } else {
+    // All 3 sets done — run progression, advance
+    await finishExercise(ex);
+  }
+}
+
+async function doSkipSet(reason) {
+  var ex = APP.exercises[APP.exIndex];
+  var setIdx = APP.pendingSet;
+  var st = ex.state;
+  var weight = [st.set1_weight, st.set2_weight, st.set3_weight][setIdx];
+
+  APP.setLogged[setIdx]     = true;
+  APP.loggedReps[setIdx]    = null;
+  APP.loggedSkipped[setIdx] = true;
+  APP.skipReasons[setIdx]   = reason;
+
+  try {
+    await logSessionSet(ex.id, setIdx+1, weight, ex.goal_reps, null, ex.is_bodyweight, 'skipped', reason);
+  } catch(e) {
+    console.error('Skip set error:', e);
+  }
+
+  if (reason === 'niggle') {
+    await markNiggleFlare();
+  }
+
+  if (setIdx < 2) {
+    APP.timerRemaining = setIdx === 0 ? (ex.rest_short_seconds || 60) : (ex.rest_long_seconds || 180);
+    APP.timerActive = true;
+    APP.screen = 'rest';
+    render();
+  } else {
+    await finishExercise(ex);
+  }
+}
+
+async function finishExercise(ex) {
+  // Run progression engine (handles skips internally)
+  var formHold = APP.formHold;
+  APP.formHold = false;
+  var setsData = [0,1,2].map(function(i) {
+    return { reps: APP.loggedReps[i], skipped: APP.loggedSkipped[i], formHold: formHold && i === 2 };
+  });
+  await runProgressionEngine(ex, setsData);
+
+  // Advance to next exercise
+  var mainExercises = APP.exercises.filter(function(e) { return !e.is_optional; });
+  var nextIdx = APP.exIndex + 1;
+
+  if (nextIdx < APP.exercises.length) {
+    APP.exIndex = nextIdx;
+    APP.setLogged  = [false, false, false];
+    APP.loggedReps = [null, null, null];
+    APP.loggedSkipped = [false, false, false];
+    APP.skipReasons   = [null, null, null];
+    APP.screen = 'workout';
+    render();
+  } else {
+    // Session complete
+    await finishSession();
+  }
+}
+
+async function finishSession() {
+  try {
+    await completeSession();
+    // Defer the day-advance until tomorrow so today's dashboard stays on today's plan.
+    // loadBootData() will apply this when APP.today > pending.date.
+    var nextGymDay = (APP.planState.current_gym_day % 3) + 1;
+    localStorage.setItem('lift_advance_pending', JSON.stringify({
+      date: APP.today,
+      nextGymDay: nextGymDay
+    }));
+  } catch(e) {
+    console.error('Finish session error:', e);
+  }
+
+  APP.sessionId = null;
+  APP.liftCompletedToday = true;
+  APP.screen = 'today';
+  render();
+}
+
+function skipRest() {
+  APP.timerActive = false;
+  APP.screen = 'log_set';
+  APP.pendingSet = APP.pendingSet + 1;
+  APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
+  render();
+}
+
+function showSkipMenu() {
+  var overlay = document.createElement('div');
+  overlay.id = 'skip-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  overlay.innerHTML = '<div style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px">'
+    + '<p style="font-size:16px;font-weight:500;margin-bottom:16px">Skip reason</p>'
+    + '<button onclick="closeSkipMenu();doSkipSet(\'niggle\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center"><i class="ti ti-alert-circle" style="color:var(--color-text-danger)"></i>Niggle / pain — protecting the joint</button>'
+    + '<button onclick="closeSkipMenu();doSkipSet(\'travel_equipment\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center"><i class="ti ti-luggage" style="color:var(--color-text-secondary)"></i>Travel / no equipment</button>'
+    + '<button onclick="closeSkipMenu();doSkipSet(\'other\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:16px;display:flex;gap:10px;align-items:center"><i class="ti ti-dots" style="color:var(--color-text-secondary)"></i>Other</button>'
+    + '<button onclick="closeSkipMenu()" style="width:100%;padding:14px;border:none;background:transparent;font-size:14px;color:var(--color-text-secondary)">Cancel</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeSkipMenu(); });
+}
+
+function closeSkipMenu() {
+  var el = document.getElementById('skip-overlay');
+  if (el) el.remove();
+}
+
+function toggleFormHold() {
+  APP.formHold = !APP.formHold;
+  render();
+}
+
+async function toggleRun() {
+  if (!APP.todayLog) { goCheckin(); return; }
+  var newVal = !APP.todayLog.run_completed;
+  var { error } = await db.from('daily_log')
+    .update({ run_completed: newVal })
+    .eq('log_date', APP.today);
+  if (!error) APP.todayLog.run_completed = newVal;
+  render();
+}
+
+async function toggleRehab() {
+  if (!APP.todayLog) { goCheckin(); return; }
+  var newVal = !APP.todayLog.rehab_completed;
+  var { error } = await db.from('daily_log')
+    .update({ rehab_completed: newVal })
+    .eq('log_date', APP.today);
+  if (!error) APP.todayLog.rehab_completed = newVal;
+  render();
+}
+
+// =============================================================
+// UTILITIES
+// =============================================================
+
+function playTimerDone() {
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // Three ascending beeps
+    [0, 0.25, 0.5].forEach(function(delay, i) {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = 440 + i * 110; // 440 → 550 → 660 Hz
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0.4, ctx.currentTime + delay);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.2);
+      osc.start(ctx.currentTime + delay);
+      osc.stop(ctx.currentTime + delay + 0.2);
+    });
+  } catch(e) {
+    // Audio not available — silently skip
+  }
+}
+
+function fmt(s) {
+  var m = Math.floor(s / 60), r = s % 60;
+  return m > 0 ? m + ':' + (r < 10 ? '0' : '') + r : s + 's';
+}
+
+// =============================================================
+// BOOT
+// =============================================================
+loadBootData();
+</script>
+</body>
+</html>
