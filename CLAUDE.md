@@ -6,7 +6,7 @@ Mobile-first PWA that runs Ben's 3-day lifting split alongside an 84-day patello
 
 Two layers, nothing in between:
 
-- **Frontend:** a single file, `index.html` (~2000 lines). Vanilla JS, no build step, no framework, no bundler. One global `APP` state object, a string-concatenation render engine, and `db.*` calls straight to Supabase.
+- **Frontend:** a single file, `index.html` (~2300 lines). Vanilla JS, no build step, no framework, no bundler. One global `APP` state object, a string-concatenation render engine, and `db.*` calls straight to Supabase.
 - **Backend:** Supabase Postgres. All objects live in the **`lift` schema** (not `public`) because the instance is shared with another app. The DB stores state + tunable thresholds; **all behavioral logic lives in the app**, not in triggers or functions. Two read-only views (`v_readiness`, `v_phase_ready`) expose computed gates.
 
 ```
@@ -18,6 +18,7 @@ There is no server, no API layer, no auth flow. The Supabase anon key is embedde
 ## File map
 
 - `index.html` — the entire app: config, `APP` state, data layer, progression engine, rehab/flare state machines, render functions, action handlers, utilities. Boots by calling `loadBootData()` at the bottom.
+- `sw.js` — service worker for background rest-timer notifications. Receives `SCHEDULE_TIMER` / `CANCEL_TIMER` messages from the page and calls `showNotification()` via `setTimeout`. Must be served from the same origin root as `index.html`.
 - `supabase/schema.sql` — full schema. **The comments are the spec** — every rule (flare handling, cycle evaluation, deload knobs) is documented inline there in detail. Read it before touching logic.
 - `supabase/seed.sql` — 15 exercises with current working weights + computed progression states, the 24-day cycle plan, and the two singleton rows (`plan_state`, `plan_config`). Weight/state math is shown per-row in comments.
 - `supabase/migrations/002_run_outcome.sql` — adds `daily_log.run_outcome` and rebuilds `v_readiness`. **Apply this against live Supabase before relying on post-run flagging.**
@@ -43,7 +44,7 @@ Singletons are enforced with a `singleton_guard BOOLEAN UNIQUE` column.
 - Two modes per exercise, chosen by whether a 5 lb step is >20% of set-3 weight: **rep-ladder** (light loads; progression is rep-based, weight advances manually) vs **classic catch-up** (the state machine).
 - Classic catch-up order: set3 advances first, then set2, then set1 (`ready → catch_up_set2 → catch_up_set1 → ready`). Targets: set2 = `ceil(s3·0.9/5)·5`, set1 = `ceil(s3·0.8/5)·5`.
 - Rep floor = `ceil(goal·0.8)`; ceiling = `goal+5`. Success = hit ≥ goal on the evaluated set. Stall = 2 consecutive sessions under floor → deload set3 by 10% (round to 5) and re-enter catch-up.
-- **5 lb increments only.** Skipped sets, form-holds, and bodyweight/optional exercises never advance progression or count as stalls. Progression is frozen entirely while `in_deload` (if `deload_freezes_progression`).
+- **5 lb increments only.** Skipped sets and bodyweight/optional exercises never advance progression or count as stalls. Progression is frozen entirely while `in_deload` (if `deload_freezes_progression`).
 - `progression_hold_until_phase` (front squats, single-leg bench squat = 3): suppress all advances while `current_phase` < that value — partial-ROM reps in early phases aren't a true progression signal.
 
 **Rehab cursor** (`advanceCycleDay`): advances **one cycle-day per completed session**, NOT by calendar. Map cursor → plan via `day_number = (current_phase-1)*8 + current_cycle_day`. On the 8→1 roll, evaluate the cycle: clean (no flare, ≤ max rest days) bumps `clean_cycles_completed` and advances phase at the threshold; otherwise the counter resets.
@@ -59,7 +60,7 @@ Singletons are enforced with a `singleton_guard BOOLEAN UNIQUE` column.
 - **Naming:** render functions are `r*` (`rToday`, `rWorkout`, `rRehabCard`…); actions/handlers are plain verbs (`startWorkout`, `doLogSet`, `saveCheckin`); data-layer functions are verbs over Supabase (`loadBootData`, `saveDailyLog`, `updatePlanState`).
 - **Style:** ES5-flavored — `var`, `function`, `.map/.forEach`, string concatenation (no template literals, no JSX). `async/await` is used for DB calls. Keep new code in the same idiom for consistency.
 - **Styling:** inline styles built from a CSS-variable design-token palette in `:root` (`--color-*`, `--radius-*`), with a full dark-mode override via `prefers-color-scheme`. Always use the tokens, never raw hex. App is width-capped at 430px (phone). Icons are Tabler webfont (`<i class="ti ti-*">`). Large tap targets, default reps pre-filled with +/- adjust, a primary "Done" action — gym-usable one-handed.
-- **Timers:** `setInterval` stored on `APP.timerInterval`; `render()` clears it on every call and re-arms it for the `rest`/`rehab` screens. `playTimerDone()` synthesizes beeps via WebAudio.
+- **Timers:** `setInterval` stored on `APP.timerInterval`; `render()` clears it on every call and re-arms it for the `rest`/`rehab` screens. Timer accuracy is anchored to `APP.timerEndTime` (absolute `Date.now()` ms), not a decrement counter — remaining time is recomputed from the end timestamp each tick and on `visibilitychange`, so background throttling can't cause drift. `playTimerDone()` synthesizes beeps via a pre-warmed `AudioContext` stored on `APP.audioCtx` (created on first `touchstart` to satisfy iOS gesture requirements). Background end-of-rest alerts are delivered via the service worker (`sw.js`) using the Web Notifications API — requires notification permission granted at workout start and the app installed as a home-screen PWA on iOS 16.4+.
 - **Rehab exercises** are matched to behavior (`timed` / `weighted` / `free`) by substring-matching the plan's `rehab_exercise` text in the `REHAB_EXERCISES` table (`rehabMatchExercise`). Rehab weights persist in `localStorage` per exercise key.
 
 ## Important behaviors / gotchas
@@ -69,11 +70,14 @@ Singletons are enforced with a `singleton_guard BOOLEAN UNIQUE` column.
 - **The cursor is per-session, not per-date.** Incidental life rest days are fine and don't break a cycle. `current_gym_day` cycles 1→2→3→1 forever and is never reset by a phase change or regression.
 - **`plan_config` is the single source for thresholds.** Read them at runtime.
 - **Schema comments are authoritative.** When logic in `index.html` and a schema comment seem to disagree, the comment documents the intended rule — reconcile, don't guess.
+- **Progression is opt-in, not automatic.** Weight advances only happen when the user taps "Confirm progression" on set 3 of an exercise (`APP.progressionReady`). The engine still computes the correct next weight and displays it on the button — it just doesn't apply without explicit confirmation. Stall counting and deload (regressions) remain automatic. The old `formHold` flag is gone; `progressionReady` is its inverse replacement.
+- **Exercise-level skipping:** `skipWholeExercise(idx, reason)` logs all 3 sets as skipped and calls `finishExercise`. Main exercises show a "Skip…" button that opens a reason sheet (niggle/travel/other). Optional finishers show a one-tap "Skip" with no reason required. Niggle skips still trigger `markNiggleFlare`.
 - **Settled design decisions exist** (progression math, flare/deload/regression model, ROM-gating, rest timers 60s/180s, superset rules). These were worked out deliberately; don't re-litigate them. Ask Ben when something is genuinely open (e.g. the "coach" UX layer, still undesigned).
 
 ## Working on this project
 
-- No build/run step: open `index.html` in a browser, or serve the folder statically. There are no tests, no linter, no package manager.
+- No build/run step: open `index.html` in a browser, or serve the folder statically (`npx serve .` works). There are no tests, no linter, no package manager.
+- `sw.js` must be served from the same path root as `index.html` (scope = `/`). If you're testing locally, use a local server — service workers don't register on `file://` URLs.
 - To change weights or the plan: edit `seed.sql` (and confirm with Ben against the source spreadsheets first), then re-run it in Supabase.
 - To change schema: write a new numbered migration in `supabase/migrations/` rather than editing `schema.sql` against a live DB. Remember `OR REPLACE` can't add columns to a view — DROP + CREATE (see migration 002).
 - Git remote: `github.com/benzr-619/Lifting-App`.

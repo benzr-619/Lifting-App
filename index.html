@@ -491,12 +491,30 @@ function repFloor(goalReps) {
   return Math.ceil(goalReps * 0.8);
 }
 
+// Exercises where the knee is the primary load-bearing joint.
+// Under amber readiness, weight advances are suppressed for these only.
+var KNEE_LOADING_EXERCISES = [
+  'front squat',
+  'single-leg bench squat',
+  'romanian deadlift',
+  'push press'
+];
+
+function isKneeLoading(ex) {
+  var name = (ex.name || '').toLowerCase();
+  return KNEE_LOADING_EXERCISES.some(function(k) { return name.indexOf(k) !== -1; });
+}
+
 // Called after all 3 sets of an exercise are logged.
 // setsData: [{reps, skipped}, {reps, skipped}, {reps, skipped}] (index 0 = set1)
 async function runProgressionEngine(ex, setsData) {
   if (ex.is_optional) return;           // finishers never feed progression
   if (ex.is_bodyweight) return;         // no weight to advance
   if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
+
+  // Amber readiness: suppress weight advances for knee-loading exercises only.
+  // Stall counting still runs so the failure streak isn't lost.
+  var amberKneeHold = APP.readiness === 'amber' && isKneeLoading(ex);
 
   var state = ex.state;
   var goalReps = ex.goal_reps;
@@ -551,6 +569,7 @@ async function runProgressionEngine(ex, setsData) {
       patch.consecutive_failures = 0;
     }
   } else if (success && progressionConfirmed) {
+    if (amberKneeHold) return; // hold flat this session; don't touch state
     failures = 0;
     patch.consecutive_failures = 0;
 
@@ -1690,6 +1709,9 @@ function rLogSet() {
     + (setIdx === 2 && !ex.is_optional && !ex.is_bodyweight
       ? (function() {
           var hint = progressionHint(ex);
+          if (APP.readiness === 'amber' && isKneeLoading(ex)) {
+            return '<p style="text-align:center;font-size:13px;color:var(--color-text-warning);margin-top:10px">Amber — knee load held flat today</p>';
+          }
           var confirmed = APP.progressionReady;
           var label = confirmed ? 'Confirmed — ' + hint : (hint || 'Confirm progression');
           return '<button onclick="toggleProgressionReady()" style="width:100%;padding:14px;border-radius:var(--radius-md);border:0.5px solid ' + (confirmed ? 'var(--color-text-success)' : 'var(--color-border)') + ';background:' + (confirmed ? 'var(--color-bg-success,#0d2b1a)' : 'transparent') + ';color:' + (confirmed ? 'var(--color-text-success)' : 'var(--color-text-secondary)') + ';font-size:14px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px">'
