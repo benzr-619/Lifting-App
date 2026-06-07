@@ -558,7 +558,6 @@ var STANCE_LABELS = { 1: 'Shoulder width', 2: 'Feet together' };
 function stanceLabel(code) { return STANCE_LABELS[code] || 'Stance ' + code; }
 
 async function runStanceProgression(ex, setsData) {
-  if (ex.is_optional) return;
   if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
   var hasSkip = setsData.some(function(s) { return s.skipped; });
   if (hasSkip) return;
@@ -591,8 +590,7 @@ async function runStanceProgression(ex, setsData) {
 
 async function runProgressionEngine(ex, setsData) {
   if (ex.progression_type === 'stance') return runStanceProgression(ex, setsData);
-  if (ex.is_optional) return;           // finishers never feed progression
-  if (ex.is_bodyweight) return;         // no weight to advance
+  if (ex.is_bodyweight) return;         // no weight to advance (ab roller etc)
   if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
 
   // Amber readiness: suppress weight advances for knee-loading exercises only.
@@ -706,7 +704,6 @@ async function runProgressionEngine(ex, setsData) {
 
 // Returns a human-readable progression hint for the workout screen
 function progressionHint(ex) {
-  if (ex.is_optional) return '';
   var st = ex.state;
   if (!st) return '';
 
@@ -724,7 +721,7 @@ function progressionHint(ex) {
   var variant = progressionVariant(st.set3_weight);
 
   if (variant === 'rep_ladder') {
-    return 'Hit ' + ex.goal_reps + ' reps → you\'ll progress to next weight';
+    return 'Add weight manually — auto-progression starts at 25 lbs';
   }
   if (st.progression_state === 'ready') {
     return 'Hit ' + ex.goal_reps + ' reps on all 3 → Set 3 advances to ' + (st.set3_weight + 5) + ' lbs';
@@ -884,6 +881,8 @@ var REHAB_EXERCISES = [
     weightKey: 'rehab_band_walk_lbs',
     defaultWeight: 25,
     increment: 5,
+    rest_short_seconds: 60,
+    rest_long_seconds: 180,
     tips: [
       'Squat down and stay there — walk sideways like the floor is slippery. Never stand up between steps.',
       'Hip sag = goblet too heavy. Lead with outside foot, trail foot follows.'
@@ -1392,7 +1391,15 @@ function rRehab() {
     html += '</div>';
 
     var completedCount = APP.rehabSetsCompleted.filter(Boolean).length;
-    if (completedCount < ex.sets) {
+    if (APP.rehabRestActive) {
+      var nextSetNum2 = completedCount + 1;
+      html += '<div style="text-align:center;margin-bottom:20px">'
+        + '<p style="font-size:12px;font-weight:500;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Rest</p>'
+        + '<div id="rehab-rest-display" style="font-size:64px;font-weight:200;letter-spacing:-2px;line-height:1">' + fmt(APP.rehabRestRemaining) + '</div>'
+        + '<p style="font-size:12px;color:var(--color-text-tertiary);margin-top:4px">Set ' + nextSetNum2 + ' starts after rest</p>'
+        + '</div>'
+        + '<button onclick="rehabSkipRest()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Start set ' + nextSetNum2 + ' now</button>';
+    } else if (completedCount < ex.sets) {
       html += '<button onclick="rehabLogSet()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Log set ' + (completedCount + 1) + ' · ' + ex.reps + ' reps</button>';
     }
 
@@ -1847,7 +1854,8 @@ function rLogSet() {
     + '<button onclick="APP.screen=\'workout\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:20px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
     + (doneHtml ? '<div style="margin-bottom:16px">' + doneHtml + '</div>' : '')
     + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:2px">Set ' + (setIdx+1) + ' of 3 · ' + ex.name + '</p>'
-    + '<h1 style="font-size:26px;margin-bottom:28px">' + weightDisplay + '</h1>'
+    + '<h1 style="font-size:26px;margin-bottom:' + (ex.form_cue ? '12px' : '28px') + '">' + weightDisplay + '</h1>'
+    + (ex.form_cue ? '<p style="font-size:13px;color:var(--color-text-secondary);padding:10px 14px;background:var(--color-bg-secondary);border-radius:var(--radius-md);margin-bottom:20px;line-height:1.5"><i class="ti ti-bulb" style="font-size:12px;margin-right:6px;color:var(--color-text-warning)"></i>' + ex.form_cue + '</p>' : '')
     + '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:36px 20px;text-align:center;margin-bottom:28px">'
     + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:8px">Reps</p>'
     + '<div id="rn" style="font-size:64px;font-weight:500;line-height:1;margin-bottom:20px">' + APP.pendingReps + '</div>'
@@ -1858,11 +1866,15 @@ function rLogSet() {
     + '</div></div>'
     + '<button onclick="doLogSet()" id="lb" style="width:100%;padding:20px;background:var(--color-text);color:var(--color-bg);border:none;border-radius:var(--radius-lg);font-size:18px;font-weight:500;margin-bottom:10px">Done · ' + APP.pendingReps + ' reps</button>'
     + (setIdx < 2 ? '<p style="text-align:center;font-size:12px;color:var(--color-text-tertiary)">→ ' + restLabel + ' rest starts after</p>' : '')
-    + (setIdx === 2 && !ex.is_optional && (!ex.is_bodyweight || ex.progression_type === 'stance')
+    + (setIdx === 2 && (!ex.is_bodyweight || ex.progression_type === 'stance')
       ? (function() {
           var hint = progressionHint(ex);
           if (APP.readiness === 'amber' && ex.progression_type !== 'stance' && isKneeLoading(ex)) {
             return '<p style="text-align:center;font-size:13px;color:var(--color-text-warning);margin-top:10px">Amber — knee load held flat today</p>';
+          }
+          // Rep-ladder: no weight advance happens — show plain hint only
+          if (ex.progression_type !== 'stance' && progressionVariant(ex.state.set3_weight) === 'rep_ladder') {
+            return hint ? '<p style="text-align:center;font-size:12px;color:var(--color-text-tertiary);margin-top:10px">' + hint + '</p>' : '';
           }
           var confirmed = APP.progressionReady;
           var label = confirmed ? 'Confirmed — ' + hint : (hint || 'Confirm progression');
@@ -2333,6 +2345,15 @@ function rehabLogSet() {
     APP.rehabSetsCompleted[completedCount] = true;
     var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
     if (ex.weightKey) localStorage.setItem(ex.weightKey, APP.rehabWeight);
+    // Start rest timer between sets (60s after set 1, 180s after set 2+)
+    var nextSet = completedCount + 1;
+    if (nextSet < ex.sets && ex.rest_short_seconds) {
+      var restDur = completedCount === 0 ? ex.rest_short_seconds : ex.rest_long_seconds;
+      APP.rehabRestActive = true;
+      APP.rehabRestRemaining = restDur;
+      APP.rehabRestEndTime = Date.now() + restDur * 1000;
+      scheduleTimerNotification(APP.rehabRestEndTime, 'Set ' + (nextSet + 1), ex.label || 'Rehab');
+    }
   }
   render();
 }
