@@ -32,6 +32,7 @@ ES5-flavored throughout: `var`, `function`, `.map/.forEach`, string concatenatio
 - Accuracy anchored to `APP.timerEndTime` (absolute `Date.now()` ms) — remaining time recomputed each tick and on `visibilitychange`. Background throttling cannot cause drift.
 - `playTimerDone()`: beeps via `AudioContext` stored on `APP.audioCtx`, created on first `touchstart` (iOS gesture requirement).
 - Background alerts: service worker (`sw.js`) + Web Notifications API. Requires permission at workout start; PWA installed to home screen on iOS 16.4+.
+- Rehab rest timer uses the same absolute-anchor pattern: `APP.rehabRestEndTime` + `APP.rehabRestActive`. See `.claude/rules/rehab.md` § Timed rehab rest timer.
 
 ## Rehab exercise matching
 Behavior (`timed` / `weighted` / `free`) determined by substring-matching `rehab_exercise` text from `cycle_plan` against the `REHAB_EXERCISES` table via `rehabMatchExercise`. Rehab weights persist in `localStorage` per exercise key.

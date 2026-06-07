@@ -55,6 +55,20 @@ Read from `plan_config` at runtime. Automatically updated by `PHASE_DELOAD_RUN_C
 
 The `updatePlanConfig(patch)` function handles DB writes and keeps `APP.planConfig` in sync. No manual intervention needed.
 
+## Timed rehab rest timer
+Timed exercises (type: `timed`, e.g. Spanish squat isometric) have a **2-minute rest between sets** enforced by the app.
+
+State fields on `APP`:
+- `rehabRestActive` (bool) — true while inter-set rest is running
+- `rehabRestEndTime` (ms) — absolute `Date.now()` anchor; remaining time recomputed each tick to survive background throttle
+- `rehabRestRemaining` (seconds) — display value
+
+Flow: set timer hits 0 → mark set complete → if more sets remain, set `rehabRestActive = true`, `rehabRestEndTime = Date.now() + 120000`, call `scheduleTimerNotification` → rest interval runs in `render()` → on expiry: advance `rehabActiveSet`, reset `rehabTimerRemaining`, beep, render.
+
+`rehabSkipRest()` cancels the notification, clears the interval, and drops immediately to the next set timer. `rehabTimerSkip()` also clears rest state in case it is called mid-rest. `goRehab()` recalculates `rehabRestRemaining` from `rehabRestEndTime` on re-entry so navigating away mid-rest doesn't reset the clock.
+
+The two rehab interval blocks in `render()` (`rehabTimerActive` and `rehabRestActive`) are mutually exclusive — `render()` always clears `APP.timerInterval` before arming a new one, so only one runs at a time.
+
 ## Readiness gate
 `v_readiness` returns green / amber / red from the latest check-in.
 `v_phase_ready` returns a boolean phase-advance gate.

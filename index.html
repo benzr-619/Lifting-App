@@ -335,6 +335,32 @@ async function loadBootData() {
     // Load exercises if today is a lift day (which day = independent cursor)
     if (APP.todayPlan.is_lift_day) {
       await loadExercises(APP.planState.current_gym_day);
+
+      // Restore in-progress workout session if one exists today
+      var tomorrow = new Date(APP.today + 'T00:00:00');
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      var tomorrowStr = tomorrow.toISOString().split('T')[0];
+      var openSessRes = await db.from('sessions').select('id')
+        .gte('started_at', APP.today + 'T00:00:00')
+        .lt('started_at', tomorrowStr + 'T00:00:00')
+        .is('completed_at', null)
+        .maybeSingle();
+      if (openSessRes.data) {
+        APP.sessionId = openSessRes.data.id;
+        var progressRaw = localStorage.getItem('lift_workout_progress');
+        if (progressRaw) {
+          try {
+            var saved = JSON.parse(progressRaw);
+            if (saved.sessionId === APP.sessionId) {
+              APP.exIndex       = saved.exIndex;
+              APP.setLogged     = saved.setLogged;
+              APP.loggedReps    = saved.loggedReps;
+              APP.loggedSkipped = saved.loggedSkipped;
+              APP.skipReasons   = saved.skipReasons;
+            }
+          } catch(e) {}
+        }
+      }
     }
 
     render();
@@ -528,7 +554,43 @@ function isKneeLoading(ex) {
 
 // Called after all 3 sets of an exercise are logged.
 // setsData: [{reps, skipped}, {reps, skipped}, {reps, skipped}] (index 0 = set1)
+var STANCE_LABELS = { 1: 'Shoulder width', 2: 'Feet together' };
+function stanceLabel(code) { return STANCE_LABELS[code] || 'Stance ' + code; }
+
+async function runStanceProgression(ex, setsData) {
+  if (ex.is_optional) return;
+  if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
+  var hasSkip = setsData.some(function(s) { return s.skipped; });
+  if (hasSkip) return;
+  var progressionConfirmed = setsData.some(function(s) { return s.progressionReady; });
+  if (!progressionConfirmed) return;
+  var reps = setsData.map(function(s) { return s.reps; });
+  if (reps.some(function(r) { return r == null; })) return;
+
+  var state    = ex.state;
+  var progState = state.progression_state;
+  var goalReps = ex.goal_reps;
+  var evalSetIdx = (progState === 'catch_up_set2') ? 1 : (progState === 'catch_up_set1') ? 0 : -1;
+  if (evalSetIdx < 0) return; // 'ready' = already at max stance, nothing to do
+
+  if (reps[evalSetIdx] < goalReps) return; // didn't hit reps — no advance
+
+  var patch = {};
+  if (progState === 'catch_up_set2') {
+    patch.set2_weight = state.set3_weight;
+    patch.progression_state = 'catch_up_set1';
+  } else if (progState === 'catch_up_set1') {
+    patch.set1_weight = state.set3_weight;
+    patch.progression_state = 'ready';
+  }
+  if (Object.keys(patch).length > 0) {
+    await updateExerciseState(ex.id, patch);
+    Object.assign(ex.state, patch);
+  }
+}
+
 async function runProgressionEngine(ex, setsData) {
+  if (ex.progression_type === 'stance') return runStanceProgression(ex, setsData);
   if (ex.is_optional) return;           // finishers never feed progression
   if (ex.is_bodyweight) return;         // no weight to advance
   if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
@@ -1131,16 +1193,24 @@ function actCard(icon, bg, col, label, val, subval, onclick, checked) {
 }
 
 function rLiftCard(gymDay, exerciseNames) {
-  var done = APP.liftCompletedToday;
+  var done       = APP.liftCompletedToday;
+  var inProgress = !done && APP.sessionId !== null;
+  var border = done ? 'var(--color-text-success)' : inProgress ? 'var(--color-text-warning)' : 'var(--color-border)';
+  var opa    = done ? ';opacity:0.65' : '';
   var checkBtn = done
     ? '<div style="width:36px;height:36px;border-radius:50%;background:var(--color-text);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-check" style="font-size:18px;color:var(--color-bg)"></i></div>'
-    : '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--color-text-tertiary)"></i>';
-  return '<div style="background:var(--color-bg);border:0.5px solid ' + (done ? 'var(--color-text-success)' : 'var(--color-border)') + ';border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;cursor:pointer' + (done ? ';opacity:0.65' : '') + '" onclick="' + (done ? '' : 'startWorkout()') + '">'
+    : inProgress
+      ? '<span style="font-size:12px;font-weight:500;color:var(--color-text-warning);flex-shrink:0">Resume →</span>'
+      : '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--color-text-tertiary)"></i>';
+  var subtitle = inProgress
+    ? 'In progress — Exercise ' + (APP.exIndex + 1) + ' of ' + exerciseNames.length
+    : 'Lift';
+  return '<div style="background:var(--color-bg);border:0.5px solid ' + border + ';border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;cursor:pointer' + opa + '" onclick="' + (done ? '' : 'startWorkout()') + '">'
     + '<div style="display:flex;align-items:center;gap:12px">'
     + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-success);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
     + '<i class="ti ti-barbell" style="font-size:20px;color:var(--color-text-success)"></i></div>'
     + '<div style="flex:1">'
-    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">Lift</p>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">' + subtitle + '</p>'
     + '<p style="font-size:16px;font-weight:500">Day ' + gymDay + ' workout</p></div>'
     + checkBtn + '</div>'
     + '<div style="border-top:0.5px solid var(--color-border);margin-top:12px;padding-top:10px;display:flex;gap:6px;flex-wrap:wrap">'
@@ -1154,11 +1224,15 @@ function rProgressSummary() {
   var ps = APP.planState;
   var pc = APP.planConfig;
   var phasePct = Math.round((ps.clean_cycles_completed / pc.clean_cycles_required) * 100);
+  var isRehab = ps.current_phase <= 3;
+  var sectionLabel = isRehab ? 'Rehab Progress' : 'Base Building Progress';
+  var phaseMax = isRehab ? 3 : 4;
+  var phaseDisplay = (isRehab ? ps.current_phase : ps.current_phase - 3) + ' / ' + phaseMax;
 
   return '<div style="margin-top:20px;padding:16px;background:var(--color-bg-secondary);border-radius:var(--radius-lg)">'
-    + '<p style="font-size:13px;font-weight:500;margin-bottom:12px">Progress</p>'
+    + '<p style="font-size:13px;font-weight:500;margin-bottom:12px">' + sectionLabel + '</p>'
     + '<div style="display:flex;gap:12px">'
-    + rStatBox('Phase', ps.current_phase + ' / 3', '')
+    + rStatBox('Phase', phaseDisplay, '')
     + rStatBox('Clean cycles', ps.clean_cycles_completed + ' / ' + pc.clean_cycles_required, '')
     + rStatBox('Cycle day', ps.current_cycle_day + ' / 8', '')
     + '</div>'
@@ -1712,10 +1786,19 @@ function rExerciseRow(ex, idx, total) {
 
 function rSupersetGroup(group, startIdx) {
   var anchor = group.find(function(e) { return e.is_superset_anchor; }) || group[0];
-  var anchorWeight = anchor.state.set1_weight; // sets share weight in superset
+  var anchorWeight = anchor.state.set1_weight;
+  var isDone = APP.exIndex > startIdx;
+  var isActive = APP.exIndex === startIdx;
 
-  var html = '<div style="border:0.5px solid var(--color-border-md);border-radius:var(--radius-lg);padding:12px;margin-bottom:8px;background:var(--color-bg-secondary)">'
-    + '<p style="font-size:11px;color:var(--color-text-secondary);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">Superset · ' + anchorWeight + ' lbs</p>';
+  var bg  = isDone ? 'var(--color-bg-success)' : 'var(--color-bg-secondary)';
+  var bdr = isDone ? 'var(--color-text-success)' : 'var(--color-border-md)';
+  var opa = (!isDone && !isActive) ? ';opacity:0.45' : '';
+
+  var html = '<div style="border:0.5px solid ' + bdr + ';border-radius:var(--radius-lg);padding:12px;margin-bottom:8px;background:' + bg + opa + '">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+    + '<p style="font-size:11px;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:0.06em">Superset · ' + anchorWeight + ' lbs</p>'
+    + (isDone ? '<i class="ti ti-circle-check" style="font-size:20px;color:var(--color-text-success)"></i>' : '')
+    + '</div>';
 
   group.forEach(function(ex, i) {
     html += '<div style="padding:8px 0;' + (i < group.length-1 ? 'border-bottom:0.5px solid var(--color-border)' : '') + '">'
@@ -1724,8 +1807,9 @@ function rSupersetGroup(group, startIdx) {
       + '</div>';
   });
 
-  // Use anchor exercise for the log button
-  html += '<button onclick="goLogSet(0,' + startIdx + ')" style="width:100%;margin-top:10px;padding:12px;background:var(--color-text);color:var(--color-bg);border:none;border-radius:var(--radius-md);font-size:14px;font-weight:500">Start superset</button>';
+  if (!isDone) {
+    html += '<button onclick="goLogSet(0,' + startIdx + ')" style="width:100%;margin-top:10px;padding:12px;background:var(--color-text);color:var(--color-bg);border:none;border-radius:var(--radius-md);font-size:14px;font-weight:500">Start superset</button>';
+  }
   html += '</div>';
   return html;
 }
@@ -1872,15 +1956,29 @@ async function startWorkout() {
       alert('Could not start session: ' + e.message);
       return;
     }
+    // Fresh session — reset all progress
+    APP.exIndex       = 0;
+    APP.setLogged     = [false, false, false];
+    APP.loggedReps    = [null, null, null];
+    APP.loggedSkipped = [false, false, false];
+    APP.skipReasons   = [null, null, null];
   }
-  APP.exIndex    = 0;
-  APP.setLogged  = [false, false, false];
-  APP.loggedReps = [null, null, null];
-  APP.loggedSkipped = [false, false, false];
-  APP.skipReasons   = [null, null, null];
+  // If sessionId was already set (restored from boot), progress state is already loaded
   APP.progressionReady = false;
   APP.screen = 'workout';
   render();
+}
+
+function saveWorkoutProgress() {
+  if (!APP.sessionId) return;
+  localStorage.setItem('lift_workout_progress', JSON.stringify({
+    sessionId:    APP.sessionId,
+    exIndex:      APP.exIndex,
+    setLogged:    APP.setLogged,
+    loggedReps:   APP.loggedReps,
+    loggedSkipped: APP.loggedSkipped,
+    skipReasons:  APP.skipReasons
+  }));
 }
 
 function goLogSet(setIdx, exIdx) {
@@ -1915,6 +2013,8 @@ async function doLogSet() {
     console.error('Log set error:', e);
   }
 
+  saveWorkoutProgress();
+
   if (setIdx < 2) {
     // Start rest timer
     APP.timerRemaining = setIdx === 0 ? (ex.rest_short_seconds || 60) : (ex.rest_long_seconds || 180);
@@ -1946,6 +2046,8 @@ async function doSkipSet(reason) {
     console.error('Skip set error:', e);
   }
 
+  saveWorkoutProgress();
+
   if (reason === 'niggle') {
     await markNiggleFlare();
   }
@@ -1971,9 +2073,13 @@ async function finishExercise(ex) {
   });
   await runProgressionEngine(ex, setsData);
 
-  // Advance to next exercise
-  var mainExercises = APP.exercises.filter(function(e) { return !e.is_optional; });
+  // Advance to next exercise — skip superset partners (logged via anchor only)
   var nextIdx = APP.exIndex + 1;
+  if (ex.superset_group_id) {
+    while (nextIdx < APP.exercises.length && APP.exercises[nextIdx].superset_group_id === ex.superset_group_id) {
+      nextIdx++;
+    }
+  }
 
   if (nextIdx < APP.exercises.length) {
     APP.exIndex = nextIdx;
@@ -2005,6 +2111,7 @@ async function finishSession() {
 
   APP.sessionId = null;
   APP.liftCompletedToday = true;
+  localStorage.removeItem('lift_workout_progress');
   APP.screen = 'today';
   render();
 }
@@ -2278,43 +2385,67 @@ function calSelectDate(dateStr) {
 // UTILITIES
 // =============================================================
 
+var BEEP_BUFFER = null; // pre-baked AudioBuffer, generated on first user gesture
+
 function ensureAudioCtx() {
   if (!APP.audioCtx) {
     try {
       APP.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     } catch(e) { return null; }
   }
-  if (APP.audioCtx.state === 'suspended') {
-    APP.audioCtx.resume();
-  }
   return APP.audioCtx;
+}
+
+// Build the beep as a PCM AudioBuffer during a user gesture so iOS lets us play it later
+function prebakeBeep(ctx) {
+  if (BEEP_BUFFER) return;
+  try {
+    // Three ascending tones: 440, 550, 660 Hz, 0.2 s each, 0.25 s apart → total ~0.7 s
+    var sampleRate = ctx.sampleRate;
+    var duration = 0.7;
+    var buf = ctx.createBuffer(1, Math.ceil(sampleRate * duration), sampleRate);
+    var data = buf.getChannelData(0);
+    var freqs = [440, 550, 660];
+    var toneLen = Math.ceil(sampleRate * 0.2);
+    freqs.forEach(function(freq, i) {
+      var offset = Math.floor(sampleRate * 0.25 * i);
+      for (var s = 0; s < toneLen; s++) {
+        var t = s / sampleRate;
+        var env = 1 - s / toneLen; // linear decay
+        data[offset + s] = Math.sin(2 * Math.PI * freq * t) * 0.4 * env;
+      }
+    });
+    BEEP_BUFFER = buf;
+  } catch(e) {}
 }
 
 function playTimerDone() {
   var ctx = ensureAudioCtx();
   if (!ctx) return;
-  try {
-    // Three ascending beeps
-    [0, 0.25, 0.5].forEach(function(delay, i) {
-      var osc = ctx.createOscillator();
-      var gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.frequency.value = 440 + i * 110; // 440 → 550 → 660 Hz
-      osc.type = 'sine';
-      gain.gain.setValueAtTime(0.4, ctx.currentTime + delay);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.2);
-      osc.start(ctx.currentTime + delay);
-      osc.stop(ctx.currentTime + delay + 0.2);
-    });
-  } catch(e) {}
+  function _play() {
+    if (!BEEP_BUFFER) { prebakeBeep(ctx); }
+    if (!BEEP_BUFFER) return;
+    try {
+      var src = ctx.createBufferSource();
+      src.buffer = BEEP_BUFFER;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch(e) {}
+  }
+  if (ctx.state !== 'running') {
+    ctx.resume().then(_play).catch(function() {});
+  } else {
+    _play();
+  }
 }
 
-// Warm up AudioContext on first touch so it's ready when the timer fires
-document.addEventListener('touchstart', function warmAudio() {
-  ensureAudioCtx();
-  document.removeEventListener('touchstart', warmAudio);
-}, { once: true });
+// On every user tap: unlock/resume AudioContext and prebake the beep buffer
+document.addEventListener('touchstart', function() {
+  var ctx = ensureAudioCtx();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') ctx.resume();
+  prebakeBeep(ctx);
+});
 
 // When app returns to foreground, recalculate timer from end timestamp
 document.addEventListener('visibilitychange', function() {
