@@ -1,94 +1,83 @@
 # Lift — workout + PFPS rehab tracker
 
-Mobile-first PWA that runs Ben's 3-day lifting split alongside an 84-day patellofemoral-pain-syndrome (PFPS) rehab/run cycle. Replaces a clunky phone spreadsheet: auto-calculated weights, a progression state machine, a daily rehab/run/lift schedule, rest timers, and a symptom-driven deload/regression engine.
+## [AUTOMATIC MAINTENANCE]
+New area-specific detail is appended directly to a targeted `.claude/rules/<area>.md` with a one-line pointer here — no rewrite of this file. Changing behavior already documented here requires confirmation first. Keep CLAUDE.md under a ~15 KB soft cap; history goes to CHANGELOG.md.
 
-## Architecture at a glance
+---
+
+Mobile-first PWA: Ben's 3-day lifting split + 84-day PFPS rehab/run cycle. Auto-calculated weights, a progression state machine, a daily schedule, rest timers, and a symptom-driven deload/regression engine.
+
+## Architecture
 
 Two layers, nothing in between:
 
-- **Frontend:** a single file, `index.html` (~2300 lines). Vanilla JS, no build step, no framework, no bundler. One global `APP` state object, a string-concatenation render engine, and `db.*` calls straight to Supabase.
-- **Backend:** Supabase Postgres. All objects live in the **`lift` schema** (not `public`) because the instance is shared with another app. The DB stores state + tunable thresholds; **all behavioral logic lives in the app**, not in triggers or functions. Two read-only views (`v_readiness`, `v_phase_ready`) expose computed gates.
+- **Frontend:** `index.html` (~2300 lines). Vanilla JS, no build step, no framework. One global `APP` state object, string-concatenation render engine, `db.*` calls straight to Supabase.
+- **Backend:** Supabase Postgres, **`lift` schema** (not `public` — shared instance). DB stores state + thresholds; **all behavioral logic lives in `index.html`**, not triggers/functions. Views `v_readiness` and `v_phase_ready` expose computed gates.
 
 ```
 index.html ── supabase-js (schema: 'lift') ──► Postgres (lift.*)
 ```
 
-There is no server, no API layer, no auth flow. The Supabase anon key is embedded in `index.html` and is public-safe (intended to be protected by row-level security — see Open items).
+No server, no API layer, no auth flow. Anon key is embedded and public-safe (RLS assumed — see Open items).
 
-## File map
+## Files
 
-- `index.html` — the entire app: config, `APP` state, data layer, progression engine, rehab/flare state machines, render functions, action handlers, utilities. Boots by calling `loadBootData()` at the bottom.
-- `sw.js` — service worker for background rest-timer notifications. Receives `SCHEDULE_TIMER` / `CANCEL_TIMER` messages from the page and calls `showNotification()` via `setTimeout`. Must be served from the same origin root as `index.html`.
-- `supabase/schema.sql` — full schema. **The comments are the spec** — every rule (flare handling, cycle evaluation, deload knobs) is documented inline there in detail. Read it before touching logic.
-- `supabase/seed.sql` — 15 exercises with current working weights + computed progression states, the 24-day cycle plan, and the two singleton rows (`plan_state`, `plan_config`). Weight/state math is shown per-row in comments.
-- `supabase/migrations/002_run_outcome.sql` — adds `daily_log.run_outcome` and rebuilds `v_readiness`. **Apply this against live Supabase before relying on post-run flagging.**
-- `Strength_Tracking_Ramping_Sets.xlsx`, `Cycle Through Days.xlsx` — the source spreadsheets the seed data was derived from. Source of truth for *initial* weights/plan; ask Ben what changed here before regenerating `seed.sql`.
-- `NEXT_CHAT_PROMPT.md`, `PLAN_EVALUATION.md` — design/handoff notes.
+| File | Purpose |
+|---|---|
+| `index.html` | Entire app. Boots via `loadBootData()` at bottom. |
+| `sw.js` | Service worker: rest-timer background alerts. Must be served from same root as `index.html`. |
+| `supabase/schema.sql` | Full schema. **Comments are the spec** — read before touching logic. |
+| `supabase/seed.sql` | 15 exercises, 24-day cycle plan, singleton rows. Weight math in comments. |
+| `supabase/migrations/002_run_outcome.sql` | Adds `daily_log.run_outcome`, rebuilds `v_readiness`. **Not yet applied to live DB.** |
+| `Strength_Tracking_Ramping_Sets.xlsx`, `Cycle Through Days.xlsx` | Source of truth for initial weights/plan. Confirm with Ben before regenerating seed. |
+| `NEXT_CHAT_PROMPT.md`, `PLAN_EVALUATION.md` | Design/handoff notes. |
 
-## Data model (lift schema)
+## Data model (`lift` schema)
 
-- **`exercises`** — static config per exercise: `gym_day` (1–3), `day_order` (position; supersets share a value), `goal_reps`, increments, rest seconds, `form_cue`, and flags: `is_bodyweight`, `is_optional` (finisher), `superset_group_id` + `is_superset_anchor`, `progression_hold_until_phase`.
-- **`exercise_state`** — one row per exercise: `set1/2/3_weight`, `progression_state` enum, `consecutive_failures`.
-- **`sessions`** / **`session_sets`** — one row per gym visit; one row per logged set. `target_reps` is **snapshotted at log time** so history stays correct after progression. A set is `completed` (has `actual_reps`) or `skipped` (has `skip_reason`); a CHECK constraint enforces the pairing.
-- **`cycle_plan`** — 24 reference rows (3 phases × 8 days): run miles, cadence, rehab exercise + timing, `is_lift_day`.
-- **`plan_state`** (singleton) — the rehab cursor: `current_phase`, `current_cycle_day` (1–8), `current_gym_day` (1–3, advances independently), counters, `in_deload`, `deload_started_on`.
-- **`plan_config`** (singleton) — all tunable thresholds (pain threshold, clean-cycles-required, rest-day caps, flare/deload knobs). **Read these — never hard-code the numbers.**
-- **`daily_log`** — one row per calendar day: pain (1–5), `joint_fullness` (swelling), run/rehab completion, `run_outcome`.
-- **Views:** `v_readiness` (green/amber/red from latest check-in), `v_phase_ready` (boolean phase-advance gate).
+- **`exercises`** — static config: `gym_day` (1–3), `day_order`, `goal_reps`, increments, rest seconds, `form_cue`, flags (`is_bodyweight`, `is_optional`, `superset_group_id`, `is_superset_anchor`, `progression_hold_until_phase`).
+- **`exercise_state`** — per exercise: `set1/2/3_weight`, `progression_state` enum, `consecutive_failures`.
+- **`sessions`** / **`session_sets`** — per gym visit / per set. `target_reps` snapshotted at log time. A set is `completed` (has `actual_reps`) or `skipped` (has `skip_reason`); CHECK constraint enforces the pairing.
+- **`cycle_plan`** — 24 rows (3 phases × 8 days): run miles, cadence, rehab exercise + timing, `is_lift_day`.
+- **`plan_state`** (singleton) — rehab cursor: `current_phase`, `current_cycle_day` (1–8), `current_gym_day` (1–3), counters, `in_deload`, `deload_started_on`.
+- **`plan_config`** (singleton) — all tunable thresholds. **Read at runtime — never hard-code.**
+- **`daily_log`** — per calendar day: pain (1–5), `joint_fullness`, run/rehab completion, `run_outcome`.
+- **`v_readiness`** → green/amber/red. **`v_phase_ready`** → boolean.
 
-Singletons are enforced with a `singleton_guard BOOLEAN UNIQUE` column.
+Singletons enforced by `singleton_guard BOOLEAN UNIQUE`.
 
-## Core logic (all in index.html)
+## Core logic contracts
 
-**Progression engine** (`runProgressionEngine`, `progressionVariant`, `classicTargets`, `repFloor`):
-- Two modes per exercise, chosen by whether a 5 lb step is >20% of set-3 weight: **rep-ladder** (light loads; progression is rep-based, weight advances manually) vs **classic catch-up** (the state machine).
-- Classic catch-up order: set3 advances first, then set2, then set1 (`ready → catch_up_set2 → catch_up_set1 → ready`). Targets: set2 = `ceil(s3·0.9/5)·5`, set1 = `ceil(s3·0.8/5)·5`.
-- Rep floor = `ceil(goal·0.8)`; ceiling = `goal+5`. Success = hit ≥ goal on the evaluated set. Stall = 2 consecutive sessions under floor → deload set3 by 10% (round to 5) and re-enter catch-up.
-- **5 lb increments only.** Skipped sets and bodyweight/optional exercises never advance progression or count as stalls. Progression is frozen entirely while `in_deload` (if `deload_freezes_progression`).
-- `progression_hold_until_phase` (front squats, single-leg bench squat = 3): suppress all advances while `current_phase` < that value — partial-ROM reps in early phases aren't a true progression signal.
+Read `.claude/rules/progression.md` when working on the progression engine, amber suppression, or exercise skipping.
+Read `.claude/rules/rehab.md` when working on the rehab cursor, flare handling, or readiness gate.
+Read `.claude/rules/frontend.md` when working on JS conventions, render model, timers, or styling.
 
-**Rehab cursor** (`advanceCycleDay`): advances **one cycle-day per completed session**, NOT by calendar. Map cursor → plan via `day_number = (current_phase-1)*8 + current_cycle_day`. On the 8→1 roll, evaluate the cycle: clean (no flare, ≤ max rest days) bumps `clean_cycles_completed` and advances phase at the threshold; otherwise the counter resets.
+**Progression engine** (`runProgressionEngine`, `progressionVariant`, `classicTargets`, `repFloor`): two modes (rep-ladder vs classic catch-up); catch-up advances set3→set2→set1; 5 lb increments only; opt-in via user confirmation; stall/deload automatic.
 
-**Flare + deload** (`evaluateFlare`, `markNiggleFlare`): a flare = morning pain ≥ threshold, swelling, a niggle-skip, or `run_outcome='flagged'`. 1st flare in a phase → **deload (relative rest, not full rest)**: cap run mileage, freeze lift progression, suppress plyos, keep isometrics + mobility. Exit when a clean check-in AND ≥ `flare_min_rest_days` have passed; resume the same cycle-day. 2nd flare in a phase (before banking a clean cycle) → regress one phase. These rules were deliberately chosen over forced rest — don't "simplify" them back.
+**Rehab cursor** (`advanceCycleDay`): one cycle-day per completed session (not calendar). On day-8 roll, evaluates cycle for cleanliness; clean cycles bank toward phase advance.
 
-**Readiness gate**: `v_readiness` → green (go) / amber (knee loads flat) / red (regress).
+**Flare + deload** (`evaluateFlare`, `markNiggleFlare`): flare = pain ≥ threshold, swelling, niggle-skip, or flagged run. 1st flare → relative rest deload. 2nd flare before a clean cycle → regress one phase.
 
-**Amber is knee-aware, not global.** Under amber readiness, only knee-loading exercises have progression suppressed — everything else advances normally. Knee-loading exercises are identified by `isKneeLoading(ex)`, which substring-matches `ex.name` (lowercased) against `KNEE_LOADING_EXERCISES`: `['front squat', 'single-leg bench squat', 'romanian deadlift', 'push press']`. Both the engine and the set-3 UI button check this.
+**Readiness gate**: green = go; amber = knee-loading exercises held flat only; red = regress.
 
-Suppression semantics: when amber + knee-loading + user hit goal + confirmed, `runProgressionEngine` does an early `return` — **no DB write at all**. The progression state machine and failure counters are left exactly as-is. Stall counting (the `underFloor` branch) still runs normally on amber days. This means an amber session is invisible to the state machine for these exercises: next green session, progression proceeds from the same state as if the amber session never happened. The "Confirm progression" button is replaced with an amber-coloured note ("Amber — knee load held flat today") so the intent is visible in the gym.
+## Invariants (never change without confirmation)
 
-## Frontend conventions
-
-- **State:** one global `var APP = {…}`. Mutate it, then call `render()`. No reactivity — `render()` rebuilds `#screen.innerHTML` from scratch every time.
-- **Screens:** `APP.screen` is a string (`today`, `checkin`, `workout`, `log_set`, `rest`, `calendar`, `rehab`); `render()` switches on it to one `r<Screen>()` function that returns an HTML string.
-- **Naming:** render functions are `r*` (`rToday`, `rWorkout`, `rRehabCard`…); actions/handlers are plain verbs (`startWorkout`, `doLogSet`, `saveCheckin`); data-layer functions are verbs over Supabase (`loadBootData`, `saveDailyLog`, `updatePlanState`).
-- **Style:** ES5-flavored — `var`, `function`, `.map/.forEach`, string concatenation (no template literals, no JSX). `async/await` is used for DB calls. Keep new code in the same idiom for consistency.
-- **Styling:** inline styles built from a CSS-variable design-token palette in `:root` (`--color-*`, `--radius-*`), with a full dark-mode override via `prefers-color-scheme`. Always use the tokens, never raw hex. App is width-capped at 430px (phone). Icons are Tabler webfont (`<i class="ti ti-*">`). Large tap targets, default reps pre-filled with +/- adjust, a primary "Done" action — gym-usable one-handed.
-- **Timers:** `setInterval` stored on `APP.timerInterval`; `render()` clears it on every call and re-arms it for the `rest`/`rehab` screens. Timer accuracy is anchored to `APP.timerEndTime` (absolute `Date.now()` ms), not a decrement counter — remaining time is recomputed from the end timestamp each tick and on `visibilitychange`, so background throttling can't cause drift. `playTimerDone()` synthesizes beeps via a pre-warmed `AudioContext` stored on `APP.audioCtx` (created on first `touchstart` to satisfy iOS gesture requirements). Background end-of-rest alerts are delivered via the service worker (`sw.js`) using the Web Notifications API — requires notification permission granted at workout start and the app installed as a home-screen PWA on iOS 16.4+.
-- **Rehab exercises** are matched to behavior (`timed` / `weighted` / `free`) by substring-matching the plan's `rehab_exercise` text in the `REHAB_EXERCISES` table (`rehabMatchExercise`). Rehab weights persist in `localStorage` per exercise key.
-
-## Important behaviors / gotchas
-
-- **Local date, not UTC:** use `localDateStr()` (`YYYY-MM-DD` from local time) for all `log_date` / day comparisons. Never `toISOString()` for dates — it skews across midnight.
-- **Deferred day-advance:** finishing a workout does NOT advance the cursor immediately. It writes `lift_advance_pending` to `localStorage`; `loadBootData()` applies the advance on the next calendar day, so today's dashboard keeps showing today's plan after you finish. Don't "fix" this into an immediate advance.
-- **The cursor is per-session, not per-date.** Incidental life rest days are fine and don't break a cycle. `current_gym_day` cycles 1→2→3→1 forever and is never reset by a phase change or regression.
-- **`plan_config` is the single source for thresholds.** Read them at runtime.
-- **Schema comments are authoritative.** When logic in `index.html` and a schema comment seem to disagree, the comment documents the intended rule — reconcile, don't guess.
-- **Progression is opt-in, not automatic.** Weight advances only happen when the user taps "Confirm progression" on set 3 of an exercise (`APP.progressionReady`). The engine still computes the correct next weight and displays it on the button — it just doesn't apply without explicit confirmation. Stall counting and deload (regressions) remain automatic. The old `formHold` flag is gone; `progressionReady` is its inverse replacement.
-- **Exercise-level skipping:** `skipWholeExercise(idx, reason)` logs all 3 sets as skipped and calls `finishExercise`. Main exercises show a "Skip…" button that opens a reason sheet (niggle/travel/other). Optional finishers show a one-tap "Skip" with no reason required. Niggle skips still trigger `markNiggleFlare`.
-- **Settled design decisions exist** (progression math, flare/deload/regression model, ROM-gating, rest timers 60s/180s, superset rules). These were worked out deliberately; don't re-litigate them. Ask Ben when something is genuinely open (e.g. the "coach" UX layer, still undesigned).
+- **Local date only:** `localDateStr()` for all `log_date` comparisons. Never `toISOString()`.
+- **Deferred day-advance:** finishing a workout writes `lift_advance_pending` to `localStorage`; `loadBootData()` applies it the next calendar day. Do not make this immediate.
+- **Cursor is per-session, not per-date.** Rest days don't break cycles. `current_gym_day` never resets.
+- **`plan_config` is the single source for thresholds.**
+- **Schema comments are authoritative.** When `index.html` logic and a schema comment disagree, the comment wins — reconcile, don't guess.
+- **Settled design decisions:** progression math, flare/deload/regression model, ROM-gating, rest timers (60 s / 180 s), superset rules. Don't re-litigate. Ask Ben for genuinely open questions (e.g. coach UX layer).
 
 ## Working on this project
 
-- No build/run step: open `index.html` in a browser, or serve the folder statically (`npx serve .` works). There are no tests, no linter, no package manager.
-- `sw.js` must be served from the same path root as `index.html` (scope = `/`). If you're testing locally, use a local server — service workers don't register on `file://` URLs.
-- To change weights or the plan: edit `seed.sql` (and confirm with Ben against the source spreadsheets first), then re-run it in Supabase.
-- To change schema: write a new numbered migration in `supabase/migrations/` rather than editing `schema.sql` against a live DB. Remember `OR REPLACE` can't add columns to a view — DROP + CREATE (see migration 002).
+- No build step: open `index.html` in a browser or `npx serve .`. No tests, linter, or package manager.
+- `sw.js` requires a local server (not `file://`) for service worker registration.
+- Schema changes: new numbered migration in `supabase/migrations/` — don't edit `schema.sql` against a live DB. `OR REPLACE` can't add columns to a view — DROP + CREATE (see migration 002).
 - Git remote: `github.com/benzr-619/Lifting-App`.
 
-## Open / not yet done
+## Open items
 
-- **Migration 002 not yet applied** to live Supabase (adds `run_outcome` + flagged-run flare handling).
-- **Row-level security** — the anon key is public; RLS policies are assumed but should be verified before this is genuinely multi-user or exposed.
-- **Coach UX** on top of the daily check-in is undesigned. Keep it rules-based (no LLM) unless decided otherwise.
-- Future, deferred: LM Studio + Qwen for AI analysis.
+- **Migration 002** not yet applied to live Supabase (`run_outcome` + flagged-run flare).
+- **RLS** — anon key is public; verify policies before multi-user exposure.
+- **Coach UX** on daily check-in is undesigned. Keep rules-based (no LLM) unless decided otherwise.
+- Deferred: LM Studio + Qwen for AI analysis.

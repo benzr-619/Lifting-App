@@ -1374,13 +1374,13 @@ function rCalendar() {
       + '<span style="font-size:12px;font-weight:' + (isToday ? '700' : '400') + ';color:' + (isToday ? 'var(--color-text-info)' : 'var(--color-text)') + '">' + d + '</span>';
 
     if (!isFuture && (hasLift || hasRun || hasRehab)) {
-      html += '<div style="display:flex;gap:2px;margin-top:4px;flex-wrap:wrap;justify-content:center">';
-      if (hasLift)  html += '<span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-success);flex-shrink:0"></span>';
-      if (hasRun)   html += '<span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-info);flex-shrink:0"></span>';
-      if (hasRehab) html += '<span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-warning);flex-shrink:0"></span>';
+      html += '<div style="display:flex;gap:3px;margin-top:5px;flex-wrap:wrap;justify-content:center">';
+      if (hasLift)  html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-success);flex-shrink:0;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span>';
+      if (hasRun)   html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-info);flex-shrink:0;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span>';
+      if (hasRehab) html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-warning);flex-shrink:0;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span>';
       html += '</div>';
     } else if (!isFuture && log) {
-      html += '<div style="margin-top:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--color-text-tertiary);display:inline-block"></span></div>';
+      html += '<div style="margin-top:5px"><span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-tertiary);display:inline-block;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span></div>';
     }
 
     html += '</div>';
@@ -1408,8 +1408,8 @@ function rCalendar() {
 }
 
 function rCalLegendDot(color, label) {
-  return '<span style="font-size:11px;color:var(--color-text-secondary);display:flex;align-items:center;gap:4px">'
-    + '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';display:inline-block;flex-shrink:0"></span>'
+  return '<span style="font-size:12px;color:var(--color-text-secondary);display:flex;align-items:center;gap:5px">'
+    + '<span style="width:10px;height:10px;border-radius:50%;background:' + color + ';display:inline-block;flex-shrink:0;box-shadow:0 0 0 1.5px rgba(0,0,0,0.2)"></span>'
     + label + '</span>';
 }
 
@@ -1457,10 +1457,12 @@ function rCalUpcoming() {
     + '<p style="font-size:13px;font-weight:500;margin-bottom:2px">Coming up</p>'
     + '<p style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:12px">Next sessions in planned order — dates depend on when you train</p>';
 
+  var nextGymDay = APP.planState ? APP.planState.current_gym_day : 1;
   APP.calUpcoming.forEach(function(day, i) {
     var rows = [];
     if (day.is_lift_day) {
-      rows.push({ icon: 'ti-barbell',  col: 'var(--color-text-success)', text: 'Lift' });
+      rows.push({ icon: 'ti-barbell',  col: 'var(--color-text-success)', text: 'Lift ' + nextGymDay });
+      nextGymDay = (nextGymDay % 3) + 1;
     }
     if (day.run_miles) {
       var rt = 'Run ' + day.run_miles + ' mi';
