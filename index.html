@@ -654,13 +654,17 @@ async function runProgressionEngine(ex, setsData) {
     failures = 0;
     patch.consecutive_failures = 0;
 
-    if (variant === 'rep_ladder') {
-      // Rep-ladder: all sets same weight; on success just stay ready
-      // (weight advances are manual for rep-ladder mode — keep as-is,
-      //  rep-ladder progression is rep-based not weight-based)
-      patch.progression_state = 'ready';
+    if (variant === 'rep_ladder' && progState === 'ready') {
+      // Rep-ladder: advance weight only when ceiling reps (goal+5) are hit on set3.
+      // catch_up states fall through to classic logic to sync set1/set2 to new set3.
+      if (evalReps >= ceiling) {
+        patch.set3_weight = s3w + 5;
+        patch.progression_state = 'catch_up_set2';
+      } else {
+        patch.progression_state = 'ready';
+      }
     } else {
-      // Classic catch-up state machine
+      // Classic catch-up state machine (also handles rep_ladder catch_up states)
       if (progState === 'ready') {
         // Set3 succeeded — advance set3 by 5, enter catch_up_set2
         patch.set3_weight = s3w + 5;
@@ -721,7 +725,17 @@ function progressionHint(ex) {
   var variant = progressionVariant(st.set3_weight);
 
   if (variant === 'rep_ladder') {
-    return 'Add weight manually — auto-progression starts at 25 lbs';
+    var ladderCeiling = ex.goal_reps + 5;
+    var ladderNext = st.set3_weight + 5;
+    if (st.progression_state === 'ready') {
+      return 'Hit ' + ladderCeiling + ' reps on set 3 → advance to ' + ladderNext + ' lbs';
+    }
+    if (st.progression_state === 'catch_up_set2') {
+      return 'Catching up Set 2 → target ' + st.set3_weight + ' lbs';
+    }
+    if (st.progression_state === 'catch_up_set1') {
+      return 'Catching up Set 1 → target ' + st.set3_weight + ' lbs';
+    }
   }
   if (st.progression_state === 'ready') {
     return 'Hit ' + ex.goal_reps + ' reps on all 3 → Set 3 advances to ' + (st.set3_weight + 5) + ' lbs';
@@ -995,7 +1009,7 @@ function render() {
         cancelTimerNotification();
         playTimerDone();
         APP.pendingSet = APP.pendingSet + 1;
-        APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
+        APP.pendingReps = defaultReps(APP.exercises[APP.exIndex]);
         APP.screen = 'log_set';
         render();
       }
@@ -1872,10 +1886,6 @@ function rLogSet() {
           if (APP.readiness === 'amber' && ex.progression_type !== 'stance' && isKneeLoading(ex)) {
             return '<p style="text-align:center;font-size:13px;color:var(--color-text-warning);margin-top:10px">Amber — knee load held flat today</p>';
           }
-          // Rep-ladder: no weight advance happens — show plain hint only
-          if (ex.progression_type !== 'stance' && progressionVariant(ex.state.set3_weight) === 'rep_ladder') {
-            return hint ? '<p style="text-align:center;font-size:12px;color:var(--color-text-tertiary);margin-top:10px">' + hint + '</p>' : '';
-          }
           var confirmed = APP.progressionReady;
           var label = confirmed ? 'Confirmed — ' + hint : (hint || 'Confirm progression');
           return '<button onclick="toggleProgressionReady()" style="width:100%;padding:14px;border-radius:var(--radius-md);border:0.5px solid ' + (confirmed ? 'var(--color-text-success)' : 'var(--color-border)') + ';background:' + (confirmed ? 'var(--color-bg-success,#0d2b1a)' : 'transparent') + ';color:' + (confirmed ? 'var(--color-text-success)' : 'var(--color-text-secondary)') + ';font-size:14px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px">'
@@ -2002,10 +2012,19 @@ function saveWorkoutProgress() {
   }));
 }
 
+function defaultReps(ex) {
+  // Rep-ladder: pre-fill with ceiling (goal+5) so user sees the target they're chasing
+  if (ex && !ex.is_bodyweight && ex.progression_type !== 'stance' &&
+      progressionVariant(ex.state && ex.state.set3_weight) === 'rep_ladder') {
+    return ex.goal_reps + 5;
+  }
+  return ex ? ex.goal_reps : 0;
+}
+
 function goLogSet(setIdx, exIdx) {
   APP.exIndex    = exIdx;
   APP.pendingSet = setIdx;
-  APP.pendingReps = APP.exercises[exIdx].goal_reps;
+  APP.pendingReps = defaultReps(APP.exercises[exIdx]);
   APP.screen = 'log_set';
   render();
 }
@@ -2143,7 +2162,7 @@ function skipRest() {
   cancelTimerNotification();
   APP.screen = 'log_set';
   APP.pendingSet = APP.pendingSet + 1;
-  APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
+  APP.pendingReps = defaultReps(APP.exercises[APP.exIndex]);
   render();
 }
 
@@ -2491,7 +2510,7 @@ document.addEventListener('visibilitychange', function() {
     cancelTimerNotification();
     playTimerDone();
     APP.pendingSet = APP.pendingSet + 1;
-    APP.pendingReps = APP.exercises[APP.exIndex].goal_reps;
+    APP.pendingReps = defaultReps(APP.exercises[APP.exIndex]);
     APP.screen = 'log_set';
     render();
   } else {
