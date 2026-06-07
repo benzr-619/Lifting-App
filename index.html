@@ -403,10 +403,9 @@ async function loadCalendarData(year, month) {
 
   var [logsRes, sessionsRes, upcomingRes] = await Promise.all([
     db.from('daily_log').select('*').gte('log_date', startStr).lte('log_date', endStr),
-    db.from('sessions').select('id,gym_day,created_at,completed_at')
+    db.from('sessions').select('id,gym_day,started_at,completed_at')
       .gte('completed_at', startStr + 'T00:00:00')
-      .lte('completed_at', endStr + 'T23:59:59.999')
-      .not('completed_at', 'is', null),
+      .lte('completed_at', endStr + 'T23:59:59.999'),
     db.from('cycle_plan').select('*').in('day_number', upcomingDayNums)
   ]);
 
@@ -1375,12 +1374,12 @@ function rCalendar() {
 
     if (!isFuture && (hasLift || hasRun || hasRehab)) {
       html += '<div style="display:flex;gap:3px;margin-top:5px;flex-wrap:wrap;justify-content:center">';
-      if (hasLift)  html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-success);flex-shrink:0;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span>';
-      if (hasRun)   html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-info);flex-shrink:0;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span>';
-      if (hasRehab) html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-warning);flex-shrink:0;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span>';
+      if (hasLift)  html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-success);flex-shrink:0;box-shadow:none"></span>';
+      if (hasRun)   html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-info);flex-shrink:0;box-shadow:none"></span>';
+      if (hasRehab) html += '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-warning);flex-shrink:0;box-shadow:none"></span>';
       html += '</div>';
     } else if (!isFuture && log) {
-      html += '<div style="margin-top:5px"><span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-tertiary);display:inline-block;box-shadow:0 0 0 1.5px rgba(0,0,0,0.25)"></span></div>';
+      html += '<div style="margin-top:5px"><span style="width:8px;height:8px;border-radius:50%;background:var(--color-text-tertiary);display:inline-block;box-shadow:none"></span></div>';
     }
 
     html += '</div>';
