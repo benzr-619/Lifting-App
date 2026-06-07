@@ -706,9 +706,21 @@ async function runProgressionEngine(ex, setsData) {
 
 // Returns a human-readable progression hint for the workout screen
 function progressionHint(ex) {
-  if (ex.is_bodyweight || ex.is_optional) return '';
+  if (ex.is_optional) return '';
   var st = ex.state;
   if (!st) return '';
+
+  if (ex.progression_type === 'stance') {
+    if (st.progression_state === 'catch_up_set2') {
+      return 'Hit ' + ex.goal_reps + ' reps → Set 2 advances to ' + stanceLabel(st.set3_weight);
+    }
+    if (st.progression_state === 'catch_up_set1') {
+      return 'Hit ' + ex.goal_reps + ' reps → Set 1 advances to ' + stanceLabel(st.set3_weight);
+    }
+    return ''; // ready = all at max, nothing to show
+  }
+
+  if (ex.is_bodyweight) return '';
   var variant = progressionVariant(st.set3_weight);
 
   if (variant === 'rep_ladder') {
@@ -1742,7 +1754,12 @@ function rExerciseRow(ex, idx, total) {
   var opa  = isPending ? ';opacity:0.45' : '';
 
   var weights = ex.is_bodyweight ? null : [st.set1_weight, st.set2_weight, st.set3_weight];
-  var weightStr = weights ? weights.join(' / ') + ' lbs' : 'Bodyweight';
+  var weightStr;
+  if (ex.progression_type === 'stance') {
+    weightStr = [st.set1_weight, st.set2_weight, st.set3_weight].map(stanceLabel).join(' / ');
+  } else {
+    weightStr = weights ? weights.join(' / ') + ' lbs' : 'Bodyweight';
+  }
 
   var hint = progressionHint(ex);
 
@@ -1822,8 +1839,9 @@ function rLogSet() {
   var ex = APP.exercises[APP.exIndex];
   var setIdx = APP.pendingSet; // 0-based
   var st = ex.state;
-  var weight = ex.is_bodyweight ? null :
+  var weight = (ex.is_bodyweight && ex.progression_type !== 'stance') ? null :
     [st.set1_weight, st.set2_weight, st.set3_weight][setIdx];
+  var weightDisplay = ex.progression_type === 'stance' ? stanceLabel(weight) : (weight ? weight + ' lbs' : 'Bodyweight');
   var restLabel = setIdx === 0 ? '60s' : '3 min';
 
   // Already logged sets mini-summary
@@ -1841,7 +1859,7 @@ function rLogSet() {
     + '<button onclick="APP.screen=\'workout\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:20px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
     + (doneHtml ? '<div style="margin-bottom:16px">' + doneHtml + '</div>' : '')
     + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:2px">Set ' + (setIdx+1) + ' of 3 · ' + ex.name + '</p>'
-    + '<h1 style="font-size:26px;margin-bottom:28px">' + (weight ? weight + ' lbs' : 'Bodyweight') + '</h1>'
+    + '<h1 style="font-size:26px;margin-bottom:28px">' + weightDisplay + '</h1>'
     + '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:36px 20px;text-align:center;margin-bottom:28px">'
     + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:8px">Reps</p>'
     + '<div id="rn" style="font-size:64px;font-weight:500;line-height:1;margin-bottom:20px">' + APP.pendingReps + '</div>'
@@ -1852,10 +1870,10 @@ function rLogSet() {
     + '</div></div>'
     + '<button onclick="doLogSet()" id="lb" style="width:100%;padding:20px;background:var(--color-text);color:var(--color-bg);border:none;border-radius:var(--radius-lg);font-size:18px;font-weight:500;margin-bottom:10px">Done · ' + APP.pendingReps + ' reps</button>'
     + (setIdx < 2 ? '<p style="text-align:center;font-size:12px;color:var(--color-text-tertiary)">→ ' + restLabel + ' rest starts after</p>' : '')
-    + (setIdx === 2 && !ex.is_optional && !ex.is_bodyweight
+    + (setIdx === 2 && !ex.is_optional && (!ex.is_bodyweight || ex.progression_type === 'stance')
       ? (function() {
           var hint = progressionHint(ex);
-          if (APP.readiness === 'amber' && isKneeLoading(ex)) {
+          if (APP.readiness === 'amber' && ex.progression_type !== 'stance' && isKneeLoading(ex)) {
             return '<p style="text-align:center;font-size:13px;color:var(--color-text-warning);margin-top:10px">Amber — knee load held flat today</p>';
           }
           var confirmed = APP.progressionReady;
@@ -1881,8 +1899,11 @@ function rRest() {
   var setIdx = APP.pendingSet;
   var nextSetIdx = setIdx + 1;
   var st = ex.state;
-  var nextWeight = ex.is_bodyweight ? null :
+  var nextWeight = (ex.is_bodyweight && ex.progression_type !== 'stance') ? null :
     [st.set1_weight, st.set2_weight, st.set3_weight][nextSetIdx];
+  var nextWeightDisplay = ex.progression_type === 'stance'
+    ? stanceLabel(nextWeight)
+    : (nextWeight ? nextWeight + ' lbs' : 'Bodyweight');
 
   var html = '<div style="padding-top:12px">'
     + '<button onclick="skipRest()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:12px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
@@ -1898,7 +1919,7 @@ function rRest() {
     + '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:18px;text-align:center;margin-bottom:20px">'
     + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px">Next — Set ' + (nextSetIdx+1) + '</p>'
     + '<p style="font-size:24px;font-weight:500">'
-    + (nextWeight ? nextWeight + ' lbs' : 'Bodyweight')
+    + nextWeightDisplay
     + ' <span style="font-size:15px;font-weight:400;color:var(--color-text-secondary)">· ' + ex.goal_reps + ' reps</span></p>'
     + '</div>'
     + '<button onclick="skipRest()" style="width:100%;padding:12px;background:transparent;border:0.5px solid var(--color-border-md);border-radius:var(--radius-md);font-size:14px;color:var(--color-text-secondary)">Skip rest</button>'
