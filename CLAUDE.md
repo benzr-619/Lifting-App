@@ -3,6 +3,8 @@
 ## [AUTOMATIC MAINTENANCE]
 New area-specific detail is appended directly to a targeted `.claude/rules/<area>.md` with a one-line pointer here — no rewrite of this file. Changing behavior already documented here requires confirmation first. Keep CLAUDE.md under a ~15 KB soft cap; history goes to CHANGELOG.md.
 
+**After every session where a bug was fixed, a schema fact was discovered, or a gotcha was identified: update the relevant `.claude/rules/<area>.md` file immediately — do not wait to be asked.** If no rules file fits, create `.claude/rules/data.md`. This is mandatory, not optional.
+
 ---
 
 Mobile-first PWA: Ben's 3-day lifting split + 84-day PFPS rehab/run cycle. Auto-calculated weights, a progression state machine, a daily schedule, rest timers, and a symptom-driven deload/regression engine.
@@ -19,6 +21,15 @@ index.html ── supabase-js (schema: 'lift') ──► Postgres (lift.*)
 ```
 
 No server, no API layer, no auth flow. Anon key is embedded and public-safe (RLS assumed — see Open items).
+
+## Supabase MCP access
+
+Supabase MCP is connected. Use it for migrations, schema inspection, and data queries instead of asking Ben to run SQL manually.
+
+- **Project:** Grind and Flow — `project_id: copzqbnjoakvcrvmedev`
+- **Schema:** `lift` (all 8 tables visible)
+- **To apply migrations:** use `mcp__899b7744-54a6-47e1-a735-2678d4cff41e__apply_migration` with this project ID.
+- **To inspect/query:** use `execute_sql` or `list_tables` with `schemas: ["lift"]`.
 
 ## Files
 

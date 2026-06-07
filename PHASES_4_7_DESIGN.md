@@ -127,28 +127,6 @@ The triple-consecutive-day block (days 1–3) is the key probe. PFPS load tolera
 
 ---
 
-## Lift-Awareness Design Note (deferred feature)
-
-As mileage builds in Phases 4+, the 3-day lift cycle (1→2→3→1) can remain intact but the app should add context-aware hints rather than hard scheduling.
-
-**Key insight:** the three gym days are not equally knee-loading:
-- **Day 1** (single-leg RDL, bench, renegade rows, Russian twists) — low PFJ load. Available almost any day.
-- **Day 2** (single-leg bench squat) — high PFJ load. Needs buffer from hard runs.
-- **Day 3** (front squats) — high PFJ load. Needs buffer from hard runs.
-
-**Proposed progression:**
-- Phase 4: Day 1 available any day; Days 2/3 stay scheduled.
-- Phase 5: Days 2/3 get soft-constraint treatment on easy run days only. Buffer maintained around long run + workout days.
-- Phase 6–7: Only rule — heavy knee-dominant lifting (Days 2/3) should not precede the long run or the workout run.
-
-**UX model:** Hint text, not blocking. "Day 3 includes front squats — your long run is tomorrow, consider waiting a day." The cycle still advances normally; the user makes the call.
-
-**Important:** 3 sets of front squats or single-leg bench squats produces minimal muscle fatigue signal but meaningful PFJ load. Users (and this user specifically) may not feel overtaxed even when accumulating joint stress. Leg heaviness is a muscle signal, not a cartilage/synovium signal. The hint text should reflect this: frame it as joint load, not muscle fatigue.
-
-**Not yet implementing:** Full context-aware reshuffling of runs around lift days. This requires a coupled optimization (lift availability ↔ run placement) that is significantly more complex and would risk breaking the clean cycle-plan progression. Deferred.
-
----
-
 ## What Comes After Phase 7
 
-Phase 7 establishes the 35 mi/week base. The next design question (not answered here) is the transition from base-building into actual training — 2–3 run workouts per week, a long run of 12+ miles, and periodization. That's a separate planning conversation once Phase 7 is complete.
+Phase 7 establishes the 35 mi/week base. Beyond this, training schedules diverge — a marathon build looks different from a 5K block, and the lift/run balance may shift (e.g., fewer lift days during peak run weeks, or a dedicated strength phase). When implementing the cycle_plan structure, keep it generic enough to support different run day types (easy / workout / long run), variable lift frequency per cycle, and phases where the rehab slot may be empty or replaced entirely by a warm-up routine. The current 8-day session-based cursor model should handle this cleanly without structural changes — it's the content of the plan rows that will vary, not the mechanism.

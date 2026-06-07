@@ -214,7 +214,10 @@ var APP = {
   rehabTimerActive:   false,
   rehabTimerRemaining: 45,
   rehabActiveSet:     0,    // which set is being timed (0-indexed)
-  rehabWeight:        0     // loaded from localStorage per exercise
+  rehabWeight:        0,    // loaded from localStorage per exercise
+  rehabRestActive:    false,
+  rehabRestEndTime:   null,
+  rehabRestRemaining: 120
 };
 
 // =============================================================
@@ -462,6 +465,21 @@ async function updatePlanState(patch) {
   Object.assign(APP.planState, patch);
 }
 
+async function updatePlanConfig(patch) {
+  var { error } = await db
+    .from('plan_config')
+    .update(patch)
+    .eq('id', APP.planConfig.id);
+  if (error) throw error;
+  Object.assign(APP.planConfig, patch);
+}
+
+// Deload run mile caps per phase.
+// Phases 1–5: 2.0 mi (set in plan_config seed).
+// Phases 6–7: raised automatically on phase advance — 2.0 mi is too aggressive
+// when easy days are 4–5+ miles.
+var PHASE_DELOAD_RUN_CAP = { 6: 4.0, 7: 4.5 };
+
 async function updateExerciseState(exerciseId, patch) {
   var { error } = await db
     .from('exercise_state')
@@ -675,10 +693,14 @@ async function advanceCycleDay() {
       patch.clean_cycles_completed = newClean;
       patch.phase_flare_count = 0;
       // Phase advance check
-      if (newClean >= pc.clean_cycles_required && ps.current_phase < 3) {
-        patch.current_phase = ps.current_phase + 1;
+      if (newClean >= pc.clean_cycles_required && ps.current_phase < 7) {
+        var newPhase = ps.current_phase + 1;
+        patch.current_phase = newPhase;
         patch.clean_cycles_completed = 0;
-        // Reload the plan for the new phase/day
+        // Auto-raise deload run mile cap for phases where 2.0 mi is too aggressive
+        if (PHASE_DELOAD_RUN_CAP[newPhase]) {
+          await updatePlanConfig({ deload_run_mile_cap: PHASE_DELOAD_RUN_CAP[newPhase] });
+        }
       }
     } else {
       patch.clean_cycles_completed = 0;
@@ -777,7 +799,7 @@ var REHAB_EXERCISES = [
       'Loop a band around a fixed point (rack, post) at roughly shin height and step into it so the band sits across your shins. Walk out until there\'s solid tension. Feet hip-width, toes slightly out.',
       'Sit back into the squat until thighs are parallel or just below — the band pulls your shins forward, which drives the knees out over the toes and lets you load the quad tendon more purely. Aim for 60–90° knee angle.',
       'Drive knees out over the 2nd/3rd toe the entire hold and keep your chest up. The band tension is helping you stay upright — use it, don\'t fight it. Heels stay flat on the floor.',
-      'You should feel a deep quad burn by the last 15 seconds — that\'s the isometric stimulus that reduces tendon pain over time. Rest 60–90 sec between sets. If the burn is immediate and sharp, check knee angle and ease back slightly.'
+      'You should feel a deep quad burn by the last 15 seconds — that\'s the isometric stimulus that reduces tendon pain over time. Rest 2 minutes between sets — the app will time it and notify you. If the burn is immediate and sharp, check knee angle and ease back slightly.'
     ]
   },
   {
@@ -929,14 +951,37 @@ function render() {
         APP.timerInterval = null;
         APP.rehabTimerActive = false;
         playTimerDone();
-        // Mark this set complete and advance
         APP.rehabSetsCompleted[APP.rehabActiveSet] = true;
         var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
         var nextSet = APP.rehabActiveSet + 1;
         if (nextSet < ex.sets) {
-          APP.rehabActiveSet = nextSet;
-          APP.rehabTimerRemaining = ex.duration;
+          // Start 2-minute rest before next set
+          APP.rehabRestActive = true;
+          APP.rehabRestRemaining = 120;
+          APP.rehabRestEndTime = Date.now() + 120000;
+          scheduleTimerNotification(APP.rehabRestEndTime, 'Set ' + (nextSet + 1), ex.label || ex.match || 'Rehab');
         }
+        render();
+      }
+    }, 1000);
+  }
+
+  if (APP.screen === 'rehab' && APP.rehabRestActive) {
+    APP.timerInterval = setInterval(function() {
+      APP.rehabRestRemaining = Math.max(0, Math.round((APP.rehabRestEndTime - Date.now()) / 1000));
+      var el = document.getElementById('rehab-rest-display');
+      if (el) el.textContent = fmt(APP.rehabRestRemaining);
+      if (APP.rehabRestRemaining <= 0) {
+        clearInterval(APP.timerInterval);
+        APP.timerInterval = null;
+        cancelTimerNotification();
+        APP.rehabRestActive = false;
+        APP.rehabRestEndTime = null;
+        var ex2 = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+        APP.rehabActiveSet = APP.rehabSetsCompleted.indexOf(false);
+        if (APP.rehabActiveSet < 0) APP.rehabActiveSet = ex2.sets - 1;
+        APP.rehabTimerRemaining = ex2.duration;
+        playTimerDone();
         render();
       }
     }, 1000);
@@ -1004,6 +1049,9 @@ function rToday() {
 
   // Run card (if today has a run)
   if (tp.run_miles !== null) {
+    // deload_run_mile_cap is read from plan_config at runtime.
+    // Automatically raised to 4.0 mi (Phase 6) / 4.5 mi (Phase 7) on phase advance
+    // via PHASE_DELOAD_RUN_CAP — no manual intervention needed.
     var runMiles = (ps.in_deload && tp.run_miles > cfg.deload_run_mile_cap)
       ? cfg.deload_run_mile_cap
       : tp.run_miles;
@@ -1208,9 +1256,18 @@ function rRehab() {
     }
     html += '</div>';
 
-    // Timer display for active set
+    // Timer display for active set or rest
     var activeSetDone = APP.rehabSetsCompleted[APP.rehabActiveSet] === true;
-    if (!activeSetDone && APP.rehabActiveSet < ex.sets) {
+    if (APP.rehabRestActive) {
+      // 2-minute rest between sets
+      var nextSetNum = APP.rehabSetsCompleted.indexOf(false) + 1;
+      html += '<div style="text-align:center;margin-bottom:20px">'
+        + '<p style="font-size:12px;font-weight:500;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Rest</p>'
+        + '<div id="rehab-rest-display" style="font-size:64px;font-weight:200;letter-spacing:-2px;line-height:1">' + fmt(APP.rehabRestRemaining) + '</div>'
+        + '<p style="font-size:12px;color:var(--color-text-tertiary);margin-top:4px">Set ' + nextSetNum + ' starts after rest</p>'
+        + '</div>'
+        + '<button onclick="rehabSkipRest()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Start set ' + nextSetNum + ' now</button>';
+    } else if (!activeSetDone && APP.rehabActiveSet < ex.sets) {
       var timerVal = fmt(APP.rehabTimerRemaining);
       html += '<div style="text-align:center;margin-bottom:20px">'
         + '<div id="rehab-timer-display" style="font-size:64px;font-weight:200;letter-spacing:-2px;line-height:1">' + timerVal + '</div>'
@@ -2031,13 +2088,28 @@ function toggleProgressionReady() {
   render();
 }
 
+function maybeWriteNonLiftAdvance() {
+  // On non-lift days, write the deferred advance when both run and rehab are done.
+  // gym_day cursor does not change on non-lift days — only cycle_day advances.
+  if (APP.todayPlan.is_lift_day) return;
+  if (!APP.todayLog || !APP.todayLog.run_completed || !APP.todayLog.rehab_completed) return;
+  if (localStorage.getItem('lift_advance_pending')) return;
+  localStorage.setItem('lift_advance_pending', JSON.stringify({
+    date: APP.today,
+    nextGymDay: APP.planState.current_gym_day
+  }));
+}
+
 async function toggleRun() {
   if (!APP.todayLog) { goCheckin(); return; }
   var newVal = !APP.todayLog.run_completed;
   var { error } = await db.from('daily_log')
     .update({ run_completed: newVal })
     .eq('log_date', APP.today);
-  if (!error) APP.todayLog.run_completed = newVal;
+  if (!error) {
+    APP.todayLog.run_completed = newVal;
+    maybeWriteNonLiftAdvance();
+  }
   render();
 }
 
@@ -2047,7 +2119,10 @@ async function toggleRehab() {
   var { error } = await db.from('daily_log')
     .update({ rehab_completed: newVal })
     .eq('log_date', APP.today);
-  if (!error) APP.todayLog.rehab_completed = newVal;
+  if (!error) {
+    APP.todayLog.rehab_completed = newVal;
+    maybeWriteNonLiftAdvance();
+  }
   render();
 }
 
@@ -2069,6 +2144,14 @@ function goRehab() {
       APP.rehabTimerRemaining = ex.duration;
     }
     APP.rehabTimerActive = false; // always pause on re-entry
+    // Keep rest active if it was running (user navigated away mid-rest)
+    if (APP.rehabRestActive && APP.rehabRestEndTime) {
+      APP.rehabRestRemaining = Math.max(0, Math.round((APP.rehabRestEndTime - Date.now()) / 1000));
+      if (APP.rehabRestRemaining <= 0) {
+        APP.rehabRestActive = false;
+        APP.rehabRestEndTime = null;
+      }
+    }
   }
   // Load saved weight for weighted exercises
   if (ex.type === 'weighted' && ex.weightKey) {
@@ -2094,6 +2177,9 @@ function rehabTimerPause() {
 function rehabTimerSkip() {
   var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
   APP.rehabTimerActive = false;
+  APP.rehabRestActive = false;
+  APP.rehabRestEndTime = null;
+  cancelTimerNotification();
   clearInterval(APP.timerInterval);
   APP.timerInterval = null;
   APP.rehabSetsCompleted[APP.rehabActiveSet] = true;
@@ -2102,6 +2188,19 @@ function rehabTimerSkip() {
     APP.rehabActiveSet = next;
     APP.rehabTimerRemaining = ex.duration;
   }
+  render();
+}
+
+function rehabSkipRest() {
+  cancelTimerNotification();
+  clearInterval(APP.timerInterval);
+  APP.timerInterval = null;
+  APP.rehabRestActive = false;
+  APP.rehabRestEndTime = null;
+  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  APP.rehabActiveSet = APP.rehabSetsCompleted.indexOf(false);
+  if (APP.rehabActiveSet < 0) APP.rehabActiveSet = ex.sets - 1;
+  APP.rehabTimerRemaining = ex.duration;
   render();
 }
 
@@ -2127,7 +2226,10 @@ async function rehabMarkComplete() {
   var { error } = await db.from('daily_log')
     .update({ rehab_completed: true })
     .eq('log_date', APP.today);
-  if (!error) APP.todayLog.rehab_completed = true;
+  if (!error) {
+    APP.todayLog.rehab_completed = true;
+    maybeWriteNonLiftAdvance();
+  }
   render();
 }
 
