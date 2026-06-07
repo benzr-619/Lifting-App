@@ -336,29 +336,53 @@ async function loadBootData() {
     if (APP.todayPlan.is_lift_day) {
       await loadExercises(APP.planState.current_gym_day);
 
-      // Restore in-progress workout session if one exists today
       var tomorrow = new Date(APP.today + 'T00:00:00');
       tomorrow.setDate(tomorrow.getDate() + 1);
       var tomorrowStr = tomorrow.toISOString().split('T')[0];
-      var openSessRes = await db.from('sessions').select('id')
-        .gte('started_at', APP.today + 'T00:00:00')
-        .lt('started_at', tomorrowStr + 'T00:00:00')
-        .is('completed_at', null)
-        .maybeSingle();
-      if (openSessRes.data) {
-        APP.sessionId = openSessRes.data.id;
-        var progressRaw = localStorage.getItem('lift_workout_progress');
-        if (progressRaw) {
-          try {
-            var saved = JSON.parse(progressRaw);
-            if (saved.sessionId === APP.sessionId) {
-              APP.exIndex       = saved.exIndex;
-              APP.setLogged     = saved.setLogged;
-              APP.loggedReps    = saved.loggedReps;
-              APP.loggedSkipped = saved.loggedSkipped;
-              APP.skipReasons   = saved.skipReasons;
-            }
-          } catch(e) {}
+
+      // DB fallback: if lift_advance_pending was lost (cache clear, different browser),
+      // detect a completed session from the DB so the card still shows done.
+      if (!APP.liftCompletedToday) {
+        var doneSessRes = await db.from('sessions').select('id')
+          .eq('gym_day', APP.planState.current_gym_day)
+          .gte('started_at', APP.today + 'T00:00:00')
+          .lt('started_at', tomorrowStr + 'T00:00:00')
+          .not('completed_at', 'is', null)
+          .limit(1)
+          .maybeSingle();
+        if (doneSessRes.data) {
+          APP.liftCompletedToday = true;
+          var nextGymDay = (APP.planState.current_gym_day % 3) + 1;
+          localStorage.setItem('lift_advance_pending', JSON.stringify({
+            date: APP.today,
+            nextGymDay: nextGymDay
+          }));
+        }
+      }
+
+      // Restore in-progress workout session if one exists today and lift isn't done
+      if (!APP.liftCompletedToday) {
+        var openSessRes = await db.from('sessions').select('id')
+          .gte('started_at', APP.today + 'T00:00:00')
+          .lt('started_at', tomorrowStr + 'T00:00:00')
+          .is('completed_at', null)
+          .limit(1)
+          .maybeSingle();
+        if (openSessRes.data) {
+          APP.sessionId = openSessRes.data.id;
+          var progressRaw = localStorage.getItem('lift_workout_progress');
+          if (progressRaw) {
+            try {
+              var saved = JSON.parse(progressRaw);
+              if (saved.sessionId === APP.sessionId) {
+                APP.exIndex       = saved.exIndex;
+                APP.setLogged     = saved.setLogged;
+                APP.loggedReps    = saved.loggedReps;
+                APP.loggedSkipped = saved.loggedSkipped;
+                APP.skipReasons   = saved.skipReasons;
+              }
+            } catch(e) {}
+          }
         }
       }
     }
