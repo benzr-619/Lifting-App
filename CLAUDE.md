@@ -51,7 +51,11 @@ Singletons are enforced with a `singleton_guard BOOLEAN UNIQUE` column.
 
 **Flare + deload** (`evaluateFlare`, `markNiggleFlare`): a flare = morning pain ≥ threshold, swelling, a niggle-skip, or `run_outcome='flagged'`. 1st flare in a phase → **deload (relative rest, not full rest)**: cap run mileage, freeze lift progression, suppress plyos, keep isometrics + mobility. Exit when a clean check-in AND ≥ `flare_min_rest_days` have passed; resume the same cycle-day. 2nd flare in a phase (before banking a clean cycle) → regress one phase. These rules were deliberately chosen over forced rest — don't "simplify" them back.
 
-**Readiness gate**: `v_readiness` → green (go) / amber (hold loads flat) / red (regress).
+**Readiness gate**: `v_readiness` → green (go) / amber (knee loads flat) / red (regress).
+
+**Amber is knee-aware, not global.** Under amber readiness, only knee-loading exercises have progression suppressed — everything else advances normally. Knee-loading exercises are identified by `isKneeLoading(ex)`, which substring-matches `ex.name` (lowercased) against `KNEE_LOADING_EXERCISES`: `['front squat', 'single-leg bench squat', 'romanian deadlift', 'push press']`. Both the engine and the set-3 UI button check this.
+
+Suppression semantics: when amber + knee-loading + user hit goal + confirmed, `runProgressionEngine` does an early `return` — **no DB write at all**. The progression state machine and failure counters are left exactly as-is. Stall counting (the `underFloor` branch) still runs normally on amber days. This means an amber session is invisible to the state machine for these exercises: next green session, progression proceeds from the same state as if the amber session never happened. The "Confirm progression" button is replaced with an amber-coloured note ("Amber — knee load held flat today") so the intent is visible in the gym.
 
 ## Frontend conventions
 
