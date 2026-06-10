@@ -30,9 +30,18 @@ ES5-flavored throughout: `var`, `function`, `.map/.forEach`, string concatenatio
 ## Timers
 - `setInterval` stored on `APP.timerInterval`; `render()` clears and re-arms it for `rest`/`rehab` screens.
 - Accuracy anchored to `APP.timerEndTime` (absolute `Date.now()` ms) — remaining time recomputed each tick and on `visibilitychange`. Background throttling cannot cause drift.
-- `playTimerDone()`: beeps via `AudioContext` stored on `APP.audioCtx`, created on first `touchstart` (iOS gesture requirement).
+- `playTimerDone()`: beeps using a **pre-baked `AudioBuffer`** (`BEEP_BUFFER`), generated on every `touchstart`. Uses `BufferSourceNode` playback — do NOT revert to oscillators, which silently fail on iOS when AudioContext is suspended mid-session.
+- `ensureAudioCtx()` returns `APP.audioCtx`; if suspended, `resume()` is called but NOT awaited inline — `playTimerDone` awaits it via `.then(_play)`.
 - Background alerts: service worker (`sw.js`) + Web Notifications API. Requires permission at workout start; PWA installed to home screen on iOS 16.4+.
 - Rehab rest timer uses the same absolute-anchor pattern: `APP.rehabRestEndTime` + `APP.rehabRestActive`. See `.claude/rules/rehab.md` § Timed rehab rest timer.
+- Band walk (weighted rehab) now also uses `rehabRestActive` for 60s/180s rest between sets — the render interval handles weighted exercises correctly as long as `rehab-rest-display` element ID is present.
+
+## Workout session persistence
+- `saveWorkoutProgress()` writes `{sessionId, exIndex, setLogged, loggedReps, loggedSkipped, skipReasons}` to `localStorage('lift_workout_progress')` after every set log.
+- `loadBootData` queries for an open session today (`started_at` in date range, `completed_at IS NULL`) and restores progress from localStorage if `sessionId` matches.
+- `startWorkout()`: if `APP.sessionId` is already set (restored), skips session creation and goes straight to workout screen with restored state.
+- `finishSession()` clears `localStorage('lift_workout_progress')`.
+- Today card shows amber "Resume →" with exercise count when `APP.sessionId !== null && !liftCompletedToday`.
 
 ## Rehab exercise matching
 Behavior (`timed` / `weighted` / `free`) determined by substring-matching `rehab_exercise` text from `cycle_plan` against the `REHAB_EXERCISES` table via `rehabMatchExercise`. Rehab weights persist in `localStorage` per exercise key.

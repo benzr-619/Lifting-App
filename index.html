@@ -694,18 +694,17 @@ async function runProgressionEngine(ex, setsData) {
         patch.set3_weight = s3w + 5;
         patch.progression_state = 'catch_up_set2';
       } else if (progState === 'catch_up_set2') {
-        // Set2 caught up — now check if it needs to keep catching up
         var targets2 = classicTargets(s3w);
         if (s2w < targets2.target_s2) {
-          // Advance set2 by 5
           patch.set2_weight = Math.min(s2w + 5, targets2.target_s2);
-          // If set2 is now at target, move to catch_up_set1
           if (patch.set2_weight >= targets2.target_s2) {
-            patch.progression_state = 'catch_up_set1';
+            // Set2 just reached target — skip catch_up_set1 if s1 already there too
+            patch.progression_state = (s1w >= targets2.target_s1) ? 'ready' : 'catch_up_set1';
           }
+          // else set2 still climbing, stay in catch_up_set2
         } else {
-          // Set2 already at target
-          patch.progression_state = 'catch_up_set1';
+          // Set2 already at target — skip catch_up_set1 if s1 already there too
+          patch.progression_state = (s1w >= targets2.target_s1) ? 'ready' : 'catch_up_set1';
         }
       } else if (progState === 'catch_up_set1') {
         var targets1 = classicTargets(s3w);
@@ -1877,6 +1876,23 @@ function rLogSet() {
   var weightDisplay = ex.progression_type === 'stance' ? stanceLabel(weight) : (weight ? weight + ' lbs' : 'Bodyweight');
   var restLabel = setIdx === 0 ? '60s' : '3 min';
 
+  // Weight is the hero number for weighted exercises; stance/bodyweight keep smaller display
+  var isWeighted = !ex.is_bodyweight && ex.progression_type !== 'stance';
+  var weightFontSize = isWeighted ? '60px' : '26px';
+  var weightFontWeight = isWeighted ? '700' : '600';
+
+  // Rep-ladder reminder on sets 1-2 (set 3 already has the confirm button with the hint)
+  var isRepLadder = isWeighted && progressionVariant(st.set3_weight) === 'rep_ladder' && st.progression_state === 'ready';
+  var ladderHintHtml = '';
+  if (isRepLadder && setIdx < 2) {
+    var ladderCeiling = ex.goal_reps + 5;
+    var ladderNext = st.set3_weight + 5;
+    ladderHintHtml = '<p style="font-size:12px;color:var(--color-text-info);margin-bottom:16px;display:flex;align-items:center;gap:5px">'
+      + '<i class="ti ti-stairs-up" style="font-size:12px"></i>'
+      + 'Rep ladder · hit ' + ladderCeiling + ' on set 3 → ' + ladderNext + ' lbs'
+      + '</p>';
+  }
+
   // Already logged sets mini-summary
   var doneHtml = '';
   for (var i = 0; i < setIdx; i++) {
@@ -1888,15 +1904,17 @@ function rLogSet() {
     }
   }
 
+  var hasSubtitle = ex.form_cue || isRepLadder;
   var html = '<div style="padding-top:12px">'
     + '<button onclick="APP.screen=\'workout\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:20px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
     + (doneHtml ? '<div style="margin-bottom:16px">' + doneHtml + '</div>' : '')
-    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:2px">Set ' + (setIdx+1) + ' of 3 · ' + ex.name + '</p>'
-    + '<h1 style="font-size:26px;margin-bottom:' + (ex.form_cue ? '12px' : '28px') + '">' + weightDisplay + '</h1>'
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:4px">Set ' + (setIdx+1) + ' of 3 · ' + ex.name + '</p>'
+    + '<div style="font-size:' + weightFontSize + ';font-weight:' + weightFontWeight + ';line-height:1;letter-spacing:-1px;margin-bottom:' + (hasSubtitle ? '12px' : '28px') + '">' + weightDisplay + '</div>'
+    + ladderHintHtml
     + (ex.form_cue ? '<p style="font-size:13px;color:var(--color-text-secondary);padding:10px 14px;background:var(--color-bg-secondary);border-radius:var(--radius-md);margin-bottom:20px;line-height:1.5"><i class="ti ti-bulb" style="font-size:12px;margin-right:6px;color:var(--color-text-warning)"></i>' + ex.form_cue + '</p>' : '')
-    + '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:36px 20px;text-align:center;margin-bottom:28px">'
+    + '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:28px 20px;text-align:center;margin-bottom:28px">'
     + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:8px">Reps</p>'
-    + '<div id="rn" style="font-size:64px;font-weight:500;line-height:1;margin-bottom:20px">' + APP.pendingReps + '</div>'
+    + '<div id="rn" style="font-size:44px;font-weight:500;line-height:1;margin-bottom:20px">' + APP.pendingReps + '</div>'
     + '<div style="display:flex;justify-content:center;align-items:center;gap:24px">'
     + '<button onclick="adj(-1)" style="width:48px;height:48px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:22px;display:flex;align-items:center;justify-content:center" aria-label="fewer reps"><i class="ti ti-minus"></i></button>'
     + '<span style="font-size:12px;color:var(--color-text-tertiary)">adjust</span>'
@@ -2461,6 +2479,11 @@ function calSelectDate(dateStr) {
 var BEEP_BUFFER = null; // pre-baked AudioBuffer, generated on first user gesture
 
 function ensureAudioCtx() {
+  // iOS can close (not just suspend) the context after backgrounding — detect and replace it
+  if (APP.audioCtx && APP.audioCtx.state === 'closed') {
+    APP.audioCtx = null;
+    BEEP_BUFFER = null;
+  }
   if (!APP.audioCtx) {
     try {
       APP.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -2523,6 +2546,9 @@ document.addEventListener('touchstart', function() {
 // When app returns to foreground, recalculate timer from end timestamp
 document.addEventListener('visibilitychange', function() {
   if (document.visibilityState !== 'visible') return;
+  // Ensure audio context is alive and resumed before any potential timer-done beep
+  var _ctx = ensureAudioCtx();
+  if (_ctx && _ctx.state !== 'running') { _ctx.resume().catch(function() {}); prebakeBeep(_ctx); }
   if (!APP.timerActive || !APP.timerEndTime) return;
   APP.timerRemaining = Math.max(0, Math.round((APP.timerEndTime - Date.now()) / 1000));
   // If timer already expired while in background, fire immediately

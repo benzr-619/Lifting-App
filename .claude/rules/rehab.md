@@ -55,6 +55,9 @@ Read from `plan_config` at runtime. Automatically updated by `PHASE_DELOAD_RUN_C
 
 The `updatePlanConfig(patch)` function handles DB writes and keeps `APP.planConfig` in sync. No manual intervention needed.
 
+## Weighted rehab rest timer (band walks)
+Band walk (`type: 'weighted'`) has `rest_short_seconds: 60` and `rest_long_seconds: 180` in `REHAB_EXERCISES`. `rehabLogSet()` checks for `ex.rest_short_seconds` and starts `APP.rehabRestActive` between sets (60s after set 1, 180s after set 2). The weighted block in `rRehab` renders the rest countdown when `rehabRestActive` is true — identical display to the timed rest screen. `rehabSkipRest()` works for both.
+
 ## Timed rehab rest timer
 Timed exercises (type: `timed`, e.g. Spanish squat isometric) have a **2-minute rest between sets** enforced by the app.
 
