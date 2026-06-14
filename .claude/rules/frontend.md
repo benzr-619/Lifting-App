@@ -7,6 +7,16 @@ metadata:
 
 # Frontend Conventions
 
+## Hidden state-editor panel (`showStatePanel`)
+Manual override sheet for fixing mis-recorded days without touching Supabase by hand. **Opened by long-pressing the `Phase · Day` badge** (`id="phase-badge"` in `rToday`) — `badgePressStart`/`badgePressEnd` arm a 600ms `BADGE_PRESS_TIMER` via inline `ontouchstart`/`onmousedown` string handlers (cancel on touchmove/mouseleave). Uses the same bottom-sheet overlay idiom as `showSkipMenu` (`id="state-overlay"`, backdrop-click dismiss).
+- **Module globals:** `STATE_DRAFT` (working copy of the cursor while editing), `STATE_SESSIONS` (recent sessions loaded for the list). Both cleared by `closeStatePanel()`.
+- **Cursor editor:** ± steppers (`stateAdj` clamps) for `current_phase` (1–7), `current_cycle_day` (1–8), `current_gym_day` (1–3). `saveStateCursor()` → `updatePlanState(...)` then `loadBootData()` for a full refresh. Save button disabled until the draft differs from `APP.planState`.
+- **Lift toggle:** `stateMarkLiftDone` / `stateMarkLiftNotDone` flip `APP.liftCompletedToday` and write/clear `lift_advance_pending` (done-write mirrors `finishSession`: `nextGymDay = (current_gym_day % 3) + 1`).
+- **Recent sessions:** last 5 via `db.from('sessions')`. Re-date uses `<input type="date">` → `stateRedateSession` preserves time-of-day (only sub-second µs drop) so the stored instant's local day moves cleanly; both `started_at` and `completed_at` are patched. Delete → `db.delete` (relies on `session_sets.session_id_fkey ON DELETE CASCADE`). `refreshStateSheet()` re-renders only the sheet body in place. `localDateFromTs(ts)` mirrors `localDateStr` for a timestamp.
+
+## Deferred day-advance stale guard (`loadBootData`)
+When `lift_advance_pending.date === APP.today`, the advance is only treated as "still pending → show done" if `pending.nextGymDay !== current_gym_day`. If they're equal, the advance was already applied (e.g. via the state panel or a direct DB edit), so the entry is stale and discarded instead of re-marking the lift done. (Without this, a same-day cursor fix left the lift stuck as "done".)
+
 ## State & render model
 - One global `var APP = {…}`. Mutate it, then call `render()`.
 - `render()` rebuilds `#screen.innerHTML` from scratch — no reactivity, no diffing.

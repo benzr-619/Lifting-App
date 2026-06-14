@@ -1121,7 +1121,9 @@ function rToday() {
     + '<h1 style="font-size:26px">Today</h1>'
     + '<button onclick="goCalendar()" style="border:none;background:transparent;padding:4px;color:var(--color-text-tertiary);font-size:20px;display:flex;align-items:center" aria-label="Calendar"><i class="ti ti-calendar"></i></button>'
     + '</div>'
-    + '<span style="' + badgeStyle + '">' + badge + '</span>'
+    + '<span id="phase-badge" style="' + badgeStyle + ';cursor:pointer;-webkit-user-select:none;user-select:none"'
+    + ' ontouchstart="badgePressStart(event)" ontouchend="badgePressEnd()" ontouchmove="badgePressEnd()"'
+    + ' onmousedown="badgePressStart(event)" onmouseup="badgePressEnd()" onmouseleave="badgePressEnd()">' + badge + '</span>'
     + '</div>';
 
   // Deload banner
@@ -1808,7 +1810,8 @@ function rExerciseRow(ex, idx, total) {
 
   var hint = progressionHint(ex);
 
-  var html = '<div style="background:' + bg + ';border:0.5px solid ' + bdr + ';border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:8px' + opa + '" onclick="' + (isActive ? 'goLogSet(0,' + idx + ')' : '') + '">'
+  var rowClick = isDone ? 'showExEditSheet(' + idx + ',false)' : (isActive ? 'goLogSet(0,' + idx + ')' : '');
+  var html = '<div style="background:' + bg + ';border:0.5px solid ' + bdr + ';border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:8px' + opa + (isDone||isActive ? ';cursor:pointer' : '') + '" onclick="' + rowClick + '">'
     + '<div style="display:flex;align-items:center;gap:12px">'
     + '<div style="flex:1">'
     + '<p style="font-size:11px;color:var(--color-text-secondary);margin-bottom:2px">Exercise ' + (idx+1) + ' of ' + total + (ex.is_optional ? ' · optional' : '') + '</p>'
@@ -1817,17 +1820,24 @@ function rExerciseRow(ex, idx, total) {
     + '</div>';
 
   if (isDone) {
-    html += '<i class="ti ti-circle-check" style="font-size:24px;color:var(--color-text-success);flex-shrink:0"></i>';
+    html += '<div style="display:flex;gap:6px;align-items:center;flex-shrink:0">'
+      + '<i class="ti ti-circle-check" style="font-size:24px;color:var(--color-text-success)"></i>'
+      + '<i class="ti ti-pencil" style="font-size:15px;color:var(--color-text-tertiary)"></i>'
+      + '</div>';
   } else if (isActive && ex.is_optional) {
     html += '<div style="display:flex;gap:6px;flex-shrink:0">'
+      + '<button onclick="event.stopPropagation();showExEditSheet(' + idx + ',true)" style="padding:10px 12px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-secondary);border:0.5px solid var(--color-border-md);font-size:16px;display:flex;align-items:center"><i class="ti ti-pencil"></i></button>'
       + '<button onclick="event.stopPropagation();skipWholeExercise(' + idx + ',\'skipped\')" style="padding:10px 14px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-secondary);border:0.5px solid var(--color-border-md);font-size:14px">Skip</button>'
       + '<button onclick="event.stopPropagation();goLogSet(0,' + idx + ')" style="padding:10px 18px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:14px;font-weight:500">Start</button>'
       + '</div>';
   } else if (isActive) {
     html += '<div style="display:flex;gap:6px;flex-shrink:0">'
+      + '<button onclick="event.stopPropagation();showExEditSheet(' + idx + ',true)" style="padding:10px 12px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-secondary);border:0.5px solid var(--color-border-md);font-size:16px;display:flex;align-items:center"><i class="ti ti-pencil"></i></button>'
       + '<button onclick="event.stopPropagation();showSkipExerciseMenu(' + idx + ')" style="padding:10px 14px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-secondary);border:0.5px solid var(--color-border-md);font-size:14px">Skip…</button>'
       + '<button onclick="event.stopPropagation();goLogSet(0,' + idx + ')" style="padding:10px 18px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:14px;font-weight:500">Start</button>'
       + '</div>';
+  } else {
+    html += '<button onclick="event.stopPropagation();showExEditSheet(' + idx + ',true)" style="padding:8px 10px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-tertiary);border:none;font-size:16px;display:flex;align-items:center"><i class="ti ti-pencil"></i></button>';
   }
 
   html += '</div>';
@@ -2239,6 +2249,406 @@ function showSkipMenu() {
 function closeSkipMenu() {
   var el = document.getElementById('skip-overlay');
   if (el) el.remove();
+}
+
+// =============================================================
+// HIDDEN STATE-EDITOR PANEL (long-press the Phase · Day badge)
+// =============================================================
+var BADGE_PRESS_TIMER = null;
+var STATE_DRAFT = null;     // working copy of the cursor while editing
+var STATE_SESSIONS = [];    // recent sessions loaded for the panel
+
+function badgePressStart(ev) {
+  // Don't let the long-press also trigger text selection / context menu
+  if (ev && ev.preventDefault) ev.preventDefault();
+  clearTimeout(BADGE_PRESS_TIMER);
+  BADGE_PRESS_TIMER = setTimeout(showStatePanel, 600);
+}
+
+function badgePressEnd() {
+  clearTimeout(BADGE_PRESS_TIMER);
+  BADGE_PRESS_TIMER = null;
+}
+
+async function showStatePanel() {
+  if (!APP.planState) return;
+  STATE_DRAFT = {
+    current_phase:     APP.planState.current_phase,
+    current_cycle_day: APP.planState.current_cycle_day,
+    current_gym_day:   APP.planState.current_gym_day
+  };
+  // Load recent sessions for the list (best-effort)
+  STATE_SESSIONS = [];
+  try {
+    var res = await db.from('sessions')
+      .select('id,gym_day,started_at,completed_at')
+      .order('started_at', { ascending: false })
+      .limit(5);
+    if (res.data) STATE_SESSIONS = res.data;
+  } catch(e) { console.error('State panel session load error:', e); }
+
+  var overlay = document.createElement('div');
+  overlay.id = 'state-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  overlay.innerHTML = '<div id="state-sheet" style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px;max-height:85vh;overflow-y:auto">' + stateSheetBody() + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeStatePanel(); });
+}
+
+function closeStatePanel() {
+  var el = document.getElementById('state-overlay');
+  if (el) el.remove();
+  STATE_DRAFT = null;
+  STATE_SESSIONS = [];
+}
+
+// Re-render only the sheet body in place (keeps the overlay/backdrop)
+function refreshStateSheet() {
+  var el = document.getElementById('state-sheet');
+  if (el) el.innerHTML = stateSheetBody();
+}
+
+function stateSheetBody() {
+  var d = STATE_DRAFT;
+  var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+    + '<p style="font-size:16px;font-weight:500">Fix state</p>'
+    + '<button onclick="closeStatePanel()" style="background:transparent;border:none;color:var(--color-text-tertiary);font-size:20px;padding:4px;display:flex"><i class="ti ti-x"></i></button>'
+    + '</div>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:18px">Manual overrides — use to fix a mis-recorded day.</p>';
+
+  // --- Section A: cursor editor ---
+  html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">Cursor</p>'
+    + stateStepperRow('Phase', 'current_phase', d.current_phase, 1, 7)
+    + stateStepperRow('Cycle day', 'current_cycle_day', d.current_cycle_day, 1, 8)
+    + stateStepperRow('Gym day', 'current_gym_day', d.current_gym_day, 1, 3);
+
+  var changed = d.current_phase !== APP.planState.current_phase
+    || d.current_cycle_day !== APP.planState.current_cycle_day
+    || d.current_gym_day !== APP.planState.current_gym_day;
+  html += '<button onclick="saveStateCursor()"' + (changed ? '' : ' disabled')
+    + ' style="width:100%;padding:14px;margin:6px 0 22px;border:none;border-radius:var(--radius-md);font-size:15px;font-weight:500;'
+    + (changed ? 'background:var(--color-text);color:var(--color-bg)' : 'background:var(--color-bg-tertiary);color:var(--color-text-tertiary)') + '">Save cursor</button>';
+
+  // --- Section B: today's lift toggle ---
+  html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">Today\'s lift</p>';
+  if (APP.liftCompletedToday) {
+    html += '<button onclick="stateMarkLiftNotDone()" style="width:100%;padding:14px;margin-bottom:22px;border:0.5px solid var(--color-border-md);border-radius:var(--radius-md);background:transparent;font-size:15px;color:var(--color-text);text-align:left;display:flex;gap:10px;align-items:center"><i class="ti ti-rotate-2" style="color:var(--color-text-warning)"></i>Mark lift NOT done</button>';
+  } else {
+    html += '<button onclick="stateMarkLiftDone()" style="width:100%;padding:14px;margin-bottom:22px;border:0.5px solid var(--color-border-md);border-radius:var(--radius-md);background:transparent;font-size:15px;color:var(--color-text);text-align:left;display:flex;gap:10px;align-items:center"><i class="ti ti-check" style="color:var(--color-text-success)"></i>Mark lift done</button>';
+  }
+
+  // --- Section C: recent sessions ---
+  html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">Recent sessions</p>';
+  if (!STATE_SESSIONS.length) {
+    html += '<p style="font-size:13px;color:var(--color-text-tertiary);margin-bottom:8px">None found.</p>';
+  } else {
+    STATE_SESSIONS.forEach(function(s) {
+      var dateStr = localDateFromTs(s.started_at);
+      var open = s.completed_at ? '' : ' · in progress';
+      html += '<div style="border:0.5px solid var(--color-border);border-radius:var(--radius-md);padding:12px;margin-bottom:8px">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+        + '<span style="font-size:14px;font-weight:500">Day ' + s.gym_day + '</span>'
+        + '<span style="font-size:12px;color:var(--color-text-secondary)">' + dateStr + open + '</span>'
+        + '</div>'
+        + '<div style="display:flex;gap:8px;align-items:center">'
+        + '<input type="date" value="' + dateStr + '" onchange="stateRedateSession(\'' + s.id + '\', this.value)" style="flex:1;padding:8px;border:0.5px solid var(--color-border-md);border-radius:var(--radius-md);background:var(--color-bg);color:var(--color-text);font-size:13px">'
+        + '<button onclick="stateDeleteSession(\'' + s.id + '\')" style="padding:8px 12px;border:0.5px solid var(--color-border-md);border-radius:var(--radius-md);background:transparent;color:var(--color-text-danger);font-size:13px"><i class="ti ti-trash"></i></button>'
+        + '</div></div>';
+    });
+  }
+
+  return html;
+}
+
+function stateStepperRow(label, key, val, min, max) {
+  return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+    + '<span style="font-size:14px">' + label + '</span>'
+    + '<div style="display:flex;align-items:center;gap:14px">'
+    + '<button onclick="stateAdj(\'' + key + '\',-1,' + min + ',' + max + ')" style="width:40px;height:40px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:20px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-minus"></i></button>'
+    + '<span style="font-size:18px;font-weight:500;min-width:24px;text-align:center">' + val + '</span>'
+    + '<button onclick="stateAdj(\'' + key + '\',1,' + min + ',' + max + ')" style="width:40px;height:40px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:20px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-plus"></i></button>'
+    + '</div></div>';
+}
+
+function stateAdj(key, delta, min, max) {
+  var v = STATE_DRAFT[key] + delta;
+  if (v < min) v = min;
+  if (v > max) v = max;
+  STATE_DRAFT[key] = v;
+  refreshStateSheet();
+}
+
+async function saveStateCursor() {
+  try {
+    await updatePlanState({
+      current_phase:     STATE_DRAFT.current_phase,
+      current_cycle_day: STATE_DRAFT.current_cycle_day,
+      current_gym_day:   STATE_DRAFT.current_gym_day
+    });
+    closeStatePanel();
+    await loadBootData();  // full refresh recomputes todayPlan + exercises
+  } catch(e) {
+    console.error('Save cursor error:', e);
+    alert('Could not save cursor.');
+  }
+}
+
+function stateMarkLiftNotDone() {
+  APP.liftCompletedToday = false;
+  localStorage.removeItem('lift_advance_pending');
+  closeStatePanel();
+  render();
+}
+
+function stateMarkLiftDone() {
+  APP.liftCompletedToday = true;
+  var nextGymDay = (APP.planState.current_gym_day % 3) + 1;
+  localStorage.setItem('lift_advance_pending', JSON.stringify({
+    date: APP.today,
+    nextGymDay: nextGymDay
+  }));
+  closeStatePanel();
+  render();
+}
+
+async function stateRedateSession(id, newDate) {
+  if (!newDate) return;
+  // Preserve time-of-day from the existing started_at; default completed to +1h.
+  var sess = STATE_SESSIONS.filter(function(s) { return s.id === id; })[0];
+  var startTime = sess ? new Date(sess.started_at) : new Date(newDate + 'T12:00:00');
+  var newStart = new Date(newDate + 'T00:00:00');
+  newStart.setHours(startTime.getHours(), startTime.getMinutes(), startTime.getSeconds(), 0);
+  var patch = { started_at: newStart.toISOString() };
+  if (sess && sess.completed_at) {
+    var compTime = new Date(sess.completed_at);
+    var newComp = new Date(newDate + 'T00:00:00');
+    newComp.setHours(compTime.getHours(), compTime.getMinutes(), compTime.getSeconds(), 0);
+    patch.completed_at = newComp.toISOString();
+  }
+  try {
+    var { error } = await db.from('sessions').update(patch).eq('id', id);
+    if (error) throw error;
+    // Reflect in local list
+    if (sess) { sess.started_at = patch.started_at; if (patch.completed_at) sess.completed_at = patch.completed_at; }
+    refreshStateSheet();
+  } catch(e) {
+    console.error('Re-date session error:', e);
+    alert('Could not re-date session.');
+  }
+}
+
+async function stateDeleteSession(id) {
+  if (!confirm('Delete this session? Its logged sets are removed too.')) return;
+  try {
+    var { error } = await db.from('sessions').delete().eq('id', id);
+    if (error) throw error;
+    STATE_SESSIONS = STATE_SESSIONS.filter(function(s) { return s.id !== id; });
+    refreshStateSheet();
+  } catch(e) {
+    console.error('Delete session error:', e);
+    alert('Could not delete session.');
+  }
+}
+
+// =============================================================
+// EXERCISE EDIT SHEET (pencil button / tap completed row)
+// =============================================================
+var EX_EDIT_IDX        = null;
+var EX_EDIT_SETS       = [];    // loaded session_set rows [{id,set_number,actual_reps,set_status}]
+var EX_EDIT_REPS       = [null, null, null];  // draft reps
+var EX_WEIGHT_DRAFT    = null;  // draft exercise_state fields
+var EX_EDIT_WEIGHT_ONLY = false;
+
+async function showExEditSheet(idx, weightOnly) {
+  EX_EDIT_IDX = idx;
+  EX_EDIT_WEIGHT_ONLY = weightOnly;
+  var ex = APP.exercises[idx];
+  var st = ex.state || {};
+  EX_WEIGHT_DRAFT = {
+    set1_weight:          st.set1_weight || 0,
+    set2_weight:          st.set2_weight || 0,
+    set3_weight:          st.set3_weight || 0,
+    progression_state:    st.progression_state || 'ready',
+    consecutive_failures: st.consecutive_failures || 0
+  };
+  EX_EDIT_SETS = [];
+  EX_EDIT_REPS = [null, null, null];
+
+  if (!weightOnly && APP.sessionId) {
+    try {
+      var res = await db.from('session_sets')
+        .select('id,set_number,actual_reps,set_status')
+        .eq('session_id', APP.sessionId)
+        .eq('exercise_id', ex.id)
+        .order('set_number', { ascending: true });
+      if (res.data) {
+        EX_EDIT_SETS = res.data;
+        EX_EDIT_REPS = res.data.map(function(s) { return s.actual_reps; });
+      }
+    } catch(e) { console.error('Load ex sets error:', e); }
+  }
+
+  var overlay = document.createElement('div');
+  overlay.id = 'ex-edit-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  overlay.innerHTML = '<div id="ex-edit-sheet" style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px;max-height:85vh;overflow-y:auto">' + exEditBody() + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeExEditSheet(); });
+}
+
+function closeExEditSheet() {
+  var el = document.getElementById('ex-edit-overlay');
+  if (el) el.remove();
+  EX_EDIT_IDX = null; EX_EDIT_SETS = []; EX_EDIT_REPS = [null,null,null]; EX_WEIGHT_DRAFT = null;
+}
+
+function refreshExEditSheet() {
+  var el = document.getElementById('ex-edit-sheet');
+  if (el) el.innerHTML = exEditBody();
+}
+
+function exEditBody() {
+  var ex = APP.exercises[EX_EDIT_IDX];
+  var d  = EX_WEIGHT_DRAFT;
+  var inc = ex.increment || 5;
+
+  var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+    + '<p style="font-size:16px;font-weight:500">' + ex.name + '</p>'
+    + '<button onclick="closeExEditSheet()" style="background:transparent;border:none;color:var(--color-text-tertiary);font-size:20px;padding:4px;display:flex"><i class="ti ti-x"></i></button>'
+    + '</div>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:16px">Edit this session\'s logged reps or the weights used next session.</p>';
+
+  // --- A: Logged reps (only for done exercises with session data) ---
+  if (!EX_EDIT_WEIGHT_ONLY && EX_EDIT_SETS.length) {
+    html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">Logged reps</p>';
+    var origReps = EX_EDIT_SETS.map(function(s) { return s.actual_reps; });
+    EX_EDIT_SETS.forEach(function(s, i) {
+      var reps = EX_EDIT_REPS[i];
+      var skipped = s.set_status === 'skipped' && reps === null;
+      html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+        + '<span style="font-size:14px">Set ' + s.set_number + (skipped ? ' · skipped' : '') + '</span>'
+        + '<div style="display:flex;align-items:center;gap:12px">'
+        + '<button onclick="exRepAdj(' + i + ',-1)" style="width:38px;height:38px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-minus"></i></button>'
+        + '<span style="font-size:18px;font-weight:500;min-width:28px;text-align:center">' + (reps !== null ? reps : '—') + '</span>'
+        + '<button onclick="exRepAdj(' + i + ',1)" style="width:38px;height:38px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-plus"></i></button>'
+        + '</div></div>';
+    });
+    var repsChanged = EX_EDIT_REPS.some(function(r, i) { return r !== origReps[i] && r !== null; });
+    html += '<button onclick="saveExReps()" ' + (repsChanged ? '' : 'disabled') + ' style="width:100%;padding:12px;margin:2px 0 22px;border:none;border-radius:var(--radius-md);font-size:14px;font-weight:500;'
+      + (repsChanged ? 'background:var(--color-text);color:var(--color-bg)' : 'background:var(--color-bg-tertiary);color:var(--color-text-tertiary)') + '">Save reps</button>';
+  }
+
+  // --- B: Weights & progression (non-bodyweight, non-stance) ---
+  if (!ex.is_bodyweight && ex.progression_type !== 'stance') {
+    html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">Weights (next session)</p>'
+      + exWeightRow('Set 1', 'set1_weight', d.set1_weight, inc)
+      + exWeightRow('Set 2', 'set2_weight', d.set2_weight, inc)
+      + exWeightRow('Set 3', 'set3_weight', d.set3_weight, inc)
+      + '<p style="font-size:13px;font-weight:500;margin:14px 0 10px">Progression</p>'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+      + '<span style="font-size:14px">State</span>'
+      + '<button onclick="exCycleProgState()" style="padding:8px 14px;border:0.5px solid var(--color-border-md);border-radius:var(--radius-md);background:var(--color-bg);font-size:13px;color:var(--color-text)">' + d.progression_state + '</button>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">'
+      + '<span style="font-size:14px">Consecutive failures</span>'
+      + '<div style="display:flex;align-items:center;gap:12px">'
+      + '<button onclick="exWeightAdj(\'consecutive_failures\',-1,0,10)" style="width:38px;height:38px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-minus"></i></button>'
+      + '<span style="font-size:18px;font-weight:500;min-width:24px;text-align:center">' + d.consecutive_failures + '</span>'
+      + '<button onclick="exWeightAdj(\'consecutive_failures\',1,0,10)" style="width:38px;height:38px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-plus"></i></button>'
+      + '</div></div>';
+
+    var st = ex.state || {};
+    var wChanged = d.set1_weight !== (st.set1_weight||0) || d.set2_weight !== (st.set2_weight||0)
+      || d.set3_weight !== (st.set3_weight||0) || d.progression_state !== (st.progression_state||'ready')
+      || d.consecutive_failures !== (st.consecutive_failures||0);
+    html += '<button onclick="saveExWeights()" ' + (wChanged ? '' : 'disabled') + ' style="width:100%;padding:12px;border:none;border-radius:var(--radius-md);font-size:14px;font-weight:500;'
+      + (wChanged ? 'background:var(--color-text);color:var(--color-bg)' : 'background:var(--color-bg-tertiary);color:var(--color-text-tertiary)') + '">Save weights</button>';
+  }
+
+  return html;
+}
+
+function exWeightRow(label, key, val, inc) {
+  return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+    + '<span style="font-size:14px">' + label + '</span>'
+    + '<div style="display:flex;align-items:center;gap:12px">'
+    + '<button onclick="exWeightAdj(\'' + key + '\',-' + inc + ',0,999)" style="width:38px;height:38px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-minus"></i></button>'
+    + '<span style="font-size:18px;font-weight:500;min-width:36px;text-align:center">' + val + '</span>'
+    + '<button onclick="exWeightAdj(\'' + key + '\',' + inc + ',0,999)" style="width:38px;height:38px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center;color:var(--color-text)"><i class="ti ti-plus"></i></button>'
+    + '</div></div>';
+}
+
+var PROG_STATES = ['ready', 'catch_up_set2', 'catch_up_set1'];
+
+function exCycleProgState() {
+  var cur = EX_WEIGHT_DRAFT.progression_state;
+  var i = PROG_STATES.indexOf(cur);
+  EX_WEIGHT_DRAFT.progression_state = PROG_STATES[(i + 1) % PROG_STATES.length];
+  refreshExEditSheet();
+}
+
+function exWeightAdj(key, delta, min, max) {
+  var v = EX_WEIGHT_DRAFT[key] + delta;
+  if (v < min) v = min;
+  if (v > max) v = max;
+  EX_WEIGHT_DRAFT[key] = v;
+  refreshExEditSheet();
+}
+
+function exRepAdj(i, delta) {
+  var cur = EX_EDIT_REPS[i] !== null ? EX_EDIT_REPS[i] : (EX_EDIT_SETS[i] && EX_EDIT_SETS[i].actual_reps !== null ? EX_EDIT_SETS[i].actual_reps : 0);
+  EX_EDIT_REPS[i] = Math.max(1, cur + delta);
+  refreshExEditSheet();
+}
+
+async function saveExReps() {
+  try {
+    for (var i = 0; i < EX_EDIT_SETS.length; i++) {
+      var s = EX_EDIT_SETS[i];
+      var newReps = EX_EDIT_REPS[i];
+      if (newReps !== null && newReps !== s.actual_reps) {
+        var res = await db.from('session_sets')
+          .update({ actual_reps: newReps, set_status: 'completed', skip_reason: null })
+          .eq('id', s.id);
+        if (res.error) throw res.error;
+        EX_EDIT_SETS[i] = Object.assign({}, s, { actual_reps: newReps, set_status: 'completed' });
+      }
+    }
+    refreshExEditSheet();
+  } catch(e) {
+    console.error('Save reps error:', e);
+    alert('Could not save reps.');
+  }
+}
+
+async function saveExWeights() {
+  var ex = APP.exercises[EX_EDIT_IDX];
+  var d  = EX_WEIGHT_DRAFT;
+  var patch = {
+    set1_weight:          d.set1_weight,
+    set2_weight:          d.set2_weight,
+    set3_weight:          d.set3_weight,
+    progression_state:    d.progression_state,
+    consecutive_failures: d.consecutive_failures
+  };
+  try {
+    await updateExerciseState(ex.id, patch);
+    Object.assign(ex.state, patch);
+    closeExEditSheet();
+    render();
+  } catch(e) {
+    console.error('Save weights error:', e);
+    alert('Could not save weights.');
+  }
+}
+
+// YYYY-MM-DD in local time from a timestamp (mirrors localDateStr's local-date intent)
+function localDateFromTs(ts) {
+  var dt = new Date(ts);
+  var y = dt.getFullYear();
+  var m = String(dt.getMonth() + 1).padStart(2, '0');
+  var day = String(dt.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
 }
 
 function showSkipExerciseMenu(idx) {
