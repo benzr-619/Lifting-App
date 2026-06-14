@@ -576,6 +576,12 @@ function isKneeLoading(ex) {
   return KNEE_LOADING_EXERCISES.some(function(k) { return name.indexOf(k) !== -1; });
 }
 
+// True when today is a lift day AND a run was already logged — knee provocation is expected.
+function isRunAndLiftDay() {
+  return !!(APP.todayPlan && APP.todayPlan.is_lift_day &&
+            APP.todayLog  && APP.todayLog.run_completed);
+}
+
 // Called after all 3 sets of an exercise are logged.
 // setsData: [{reps, skipped}, {reps, skipped}, {reps, skipped}] (index 0 = set1)
 var STANCE_LABELS = { 1: 'Shoulder width', 2: 'Feet together' };
@@ -2130,7 +2136,7 @@ async function doSkipSet(reason) {
 
   saveWorkoutProgress();
 
-  if (reason === 'niggle') {
+  if (reason === 'niggle' && !(isRunAndLiftDay() && isKneeLoading(ex))) {
     await markNiggleFlare();
   }
 
@@ -2265,7 +2271,7 @@ async function skipWholeExercise(idx, reason) {
     }
   }
 
-  if (reason === 'niggle') {
+  if (reason === 'niggle' && !(isRunAndLiftDay() && isKneeLoading(ex))) {
     await markNiggleFlare();
   }
 

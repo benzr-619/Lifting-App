@@ -24,8 +24,23 @@ On the 8→1 roll, evaluate the cycle:
 A flare is triggered by **any** of:
 - Morning pain ≥ threshold (from `plan_config`)
 - `joint_fullness` (swelling) flag
-- A niggle-skip
+- A niggle-skip *(see run+lift-day exemption below)*
 - `run_outcome = 'flagged'`
+
+### Distinction: dirty-cycle vs full flare
+`markNiggleFlare()` only sets `current_cycle_clean = false` — it does NOT increment `phase_flare_count` or trigger deload. Full flare consequences (deload, regression) come only from `evaluateFlare`, which is called exclusively from the morning check-in (`saveCheckin`). A niggle-skip marks the cycle dirty but is not a full flare.
+
+### Run+lift-day exemption (`isRunAndLiftDay`)
+When today is both a lift day (`APP.todayPlan.is_lift_day`) and a run has been logged (`APP.todayLog.run_completed`), a niggle-skip of a **knee-loading exercise** (`isKneeLoading(ex)`) is treated as expected provocation — the run pre-loads the knee — and does **not** call `markNiggleFlare`.
+
+- The skip is still logged to `session_sets` with `skip_reason = 'niggle'` normally.
+- `phase_flare_count`, `in_deload`, and `current_cycle_clean` are all unaffected.
+- Niggle-skips of non-knee-loading exercises on run+lift days still call `markNiggleFlare`.
+- On lift-only days (no run logged) niggle-skips always call `markNiggleFlare` regardless of exercise.
+- Morning check-in pain ≥ threshold and `joint_fullness` still trigger full flares on any day — the exemption is skip-path only.
+- `run_outcome = 'flagged'` behavior is also unchanged.
+
+Implementation: `isRunAndLiftDay()` helper (defined next to `isKneeLoading`) is checked in both `doSkipSet` and `skipWholeExercise` before calling `markNiggleFlare`.
 
 ## Flare response
 **1st flare in a phase → deload (relative rest, not full rest):**
