@@ -33,6 +33,15 @@ ES5-flavored throughout: `var`, `function`, `.map/.forEach`, string concatenatio
 - `playTimerDone()`: beeps using a **pre-baked `AudioBuffer`** (`BEEP_BUFFER`), generated on every `touchstart`. Uses `BufferSourceNode` playback — do NOT revert to oscillators, which silently fail on iOS when AudioContext is suspended mid-session.
 - `ensureAudioCtx()` returns `APP.audioCtx`; if suspended, `resume()` is called but NOT awaited inline — `playTimerDone` awaits it via `.then(_play)`.
 - Background alerts: service worker (`sw.js`) + Web Notifications API. Requires permission at workout start; PWA installed to home screen on iOS 16.4+.
+- **SW path must be RELATIVE.** App is served from a GitHub Pages subpath (`https://benzr-619.github.io/Lifting-App/`). `navigator.serviceWorker.register('/sw.js')` resolves to the domain root → 404 → SW never registers → zero background notifications. Use `register('sw.js')`. Same for `sw.js` internals: `icon: 'logo.png'` and `clients.openWindow('./')`, never a leading `/`. (Fixed 2026-06-13 — was the root cause of "no chimes on phone".)
+- **iOS background reality:** a service-worker `setTimeout` is killed within seconds of the screen locking, and backgrounded JS halts entirely (audio suspends too). The SW scheduled notification is best-effort only — do NOT rely on it as the primary alert. The reliable mechanism for the short (60–180s) rest timers is the **Screen Wake Lock** (below), which keeps the in-page interval + `playTimerDone()` chime alive. True locked-screen alerts would need server Web Push (VAPID) — deliberately not built; disproportionate for sub-3-minute rests.
+
+## Screen Wake Lock (`requestWakeLock` / `releaseWakeLock` / `aTimerIsRunning`)
+- `navigator.wakeLock.request('screen')` held in module-global `WAKE_LOCK` while any countdown runs, so the screen stays on and the chime fires. iOS 16.4+.
+- Driven from the end of `render()`: `if (aTimerIsRunning()) requestWakeLock(); else releaseWakeLock();` — covers rest, rehab set, and rehab rest timers, and auto-releases the moment no timer is active (incl. skips, since `render()` always runs).
+- Wake locks auto-release when the page is hidden; the `visibilitychange→visible` handler re-acquires if `aTimerIsRunning()`.
+- `requestWakeLock` is idempotent (no-op if `WAKE_LOCK` already held) and fails silently on unsupported browsers.
+
 - Rehab rest timer uses the same absolute-anchor pattern: `APP.rehabRestEndTime` + `APP.rehabRestActive`. See `.claude/rules/rehab.md` § Timed rehab rest timer.
 - Band walk (weighted rehab) now also uses `rehabRestActive` for 60s/180s rest between sets — the render interval handles weighted exercises correctly as long as `rehab-rest-display` element ID is present.
 

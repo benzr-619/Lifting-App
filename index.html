@@ -1090,6 +1090,10 @@ function render() {
       }
     }, 1000);
   }
+
+  // Keep the screen awake while any countdown runs so the chime reliably fires;
+  // release as soon as no timer is active.
+  if (aTimerIsRunning()) requestWakeLock(); else releaseWakeLock();
 }
 
 // =============================================================
@@ -2555,6 +2559,8 @@ document.addEventListener('visibilitychange', function() {
   // Ensure audio context is alive and resumed before any potential timer-done beep
   var _ctx = ensureAudioCtx();
   if (_ctx && _ctx.state !== 'running') { _ctx.resume().catch(function() {}); prebakeBeep(_ctx); }
+  // Wake locks auto-release when the page is hidden — re-acquire if a timer is still running.
+  if (aTimerIsRunning()) requestWakeLock();
   if (!APP.timerActive || !APP.timerEndTime) return;
   APP.timerRemaining = Math.max(0, Math.round((APP.timerEndTime - Date.now()) / 1000));
   // If timer already expired while in background, fire immediately
@@ -2586,8 +2592,39 @@ function fmt(s) {
 
 var SW_REG = null;
 
+// ---- Screen Wake Lock --------------------------------------------------
+// iOS halts JS and suspends audio when the screen locks, and a service-worker
+// setTimeout is killed within seconds of backgrounding — so a scheduled
+// notification is best-effort at best. The reliable path for short rest timers
+// is to hold the screen awake while a timer runs, so the in-page chime fires.
+var WAKE_LOCK = null;
+
+async function requestWakeLock() {
+  if (WAKE_LOCK) return;
+  if (!('wakeLock' in navigator)) return;
+  try {
+    WAKE_LOCK = await navigator.wakeLock.request('screen');
+    WAKE_LOCK.addEventListener('release', function() { WAKE_LOCK = null; });
+  } catch (e) { WAKE_LOCK = null; }
+}
+
+function releaseWakeLock() {
+  if (!WAKE_LOCK) return;
+  try { WAKE_LOCK.release(); } catch (e) {}
+  WAKE_LOCK = null;
+}
+
+// True whenever any rest/exercise countdown is running.
+function aTimerIsRunning() {
+  return (APP.screen === 'rest' && APP.timerActive) ||
+         (APP.screen === 'rehab' && (APP.rehabTimerActive || APP.rehabRestActive));
+}
+
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').then(function(reg) {
+  // Relative path — the app is served from a GitHub Pages subpath (/Lifting-App/),
+  // so an absolute '/sw.js' 404s and the SW never registers. Resolve against the
+  // current page URL instead.
+  navigator.serviceWorker.register('sw.js').then(function(reg) {
     SW_REG = reg;
   }).catch(function(e) {
     console.warn('SW registration failed:', e);
