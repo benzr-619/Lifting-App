@@ -306,9 +306,12 @@ async function loadBootData() {
     if (pendingRaw) {
       try {
         var pending = JSON.parse(pendingRaw);
-        if (pending.date === APP.today) {
-          // Still the same day — show today's completed state, don't advance yet
+        if (pending.date === APP.today && pending.nextGymDay !== APP.planState.current_gym_day) {
+          // Still the same day and advance not yet applied — show completed state
           APP.liftCompletedToday = true;
+        } else if (pending.date === APP.today) {
+          // Advance was already applied to DB — pending is stale, discard it
+          localStorage.removeItem('lift_advance_pending');
         } else if (pending.date < APP.today) {
           // New day — apply the deferred advance now
           await updatePlanState({ current_gym_day: pending.nextGymDay });
