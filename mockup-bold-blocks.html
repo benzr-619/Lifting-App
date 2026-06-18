@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lift — Bold Color-Block mockup v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800;900&family=Fraunces:opsz,wght@9..144,600;9..144,700;9..144,900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --coral:#E8472B; --coral-deep:#C73218;
+    --green:#1F5C3D; --green-deep:#143E29;
+    --blue:#2E9BD6; --blue-deep:#1C6FA0;
+    --yellow:#F4C53A; --orange:#EE7B30;
+    --paper:#F3ECD8; --paper-2:#EDE3C7;
+    --ink:#15201B; --line:#F7F1E2;
+    --radius:24px; --radius-sm:16px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;}
+  body{
+    font-family:'Archivo',system-ui,sans-serif;
+    background:#5E6B36;
+    background-image:radial-gradient(circle at 20% 10%, #6c7a40 0%, #586331 60%, #4c5630 100%);
+    color:var(--ink); min-height:100vh; padding:48px 24px 80px;
+  }
+  body::after{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:.15;mix-blend-mode:multiply;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .page-head{max-width:1200px;margin:0 auto 40px;color:var(--paper);}
+  .page-head .kicker{font-weight:800;letter-spacing:.22em;text-transform:uppercase;font-size:12px;opacity:.8;}
+  .page-head h1{font-family:'Fraunces',serif;font-weight:900;font-size:clamp(30px,5vw,52px);margin:8px 0 6px;line-height:.98;}
+  .page-head p{max-width:640px;font-size:15px;line-height:1.5;opacity:.92;margin:0;}
+  .swatches{display:flex;gap:8px;margin-top:18px;flex-wrap:wrap;}
+  .swatches span{width:30px;height:30px;border-radius:8px;border:2px solid rgba(255,255,255,.5);}
+
+  .frames{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:48px 36px;justify-items:center;}
+  .device-wrap{width:100%;max-width:340px;}
+  .device-label{color:var(--paper);font-weight:800;text-transform:uppercase;letter-spacing:.16em;font-size:12px;margin:0 0 14px;text-align:center;opacity:.85;}
+
+  .phone{width:100%;aspect-ratio:9/19.3;background:var(--paper);border-radius:42px;padding:10px;
+    box-shadow:0 30px 60px -18px rgba(0,0,0,.55), 0 4px 0 #cfc3a0 inset;border:1px solid rgba(0,0,0,.25);position:relative;}
+  .screen{width:100%;height:100%;border-radius:34px;overflow:hidden;position:relative;background:var(--paper);display:flex;flex-direction:column;}
+  .notch{position:absolute;top:8px;left:50%;transform:translateX(-50%);width:36%;height:22px;background:var(--ink);border-radius:14px;z-index:30;}
+  .scroll{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+  .pad{padding:16px;}
+  .statusbar{display:flex;justify-content:space-between;align-items:center;padding:14px 22px 0;font-size:12px;font-weight:800;color:var(--ink);}
+
+  .eyebrow{font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-size:11px;}
+  .display{font-family:'Fraunces',serif;font-weight:900;line-height:.95;letter-spacing:-.01em;}
+  .panel{border-radius:var(--radius);position:relative;overflow:hidden;}
+  .motif{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
+
+  /* ===== TODAY ===== */
+  .top-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+  .badge{background:var(--ink);color:var(--paper);border-radius:13px;padding:8px 12px;display:inline-flex;flex-direction:column;line-height:1;}
+  .badge b{font-size:17px;font-family:'Fraunces',serif;}
+  .badge span{font-size:9px;letter-spacing:.16em;text-transform:uppercase;opacity:.7;margin-top:3px;}
+  .avatar{width:44px;height:44px;border-radius:50%;background:var(--yellow);border:3px solid var(--ink);display:flex;align-items:center;justify-content:center;font-weight:900;}
+
+  .greet .eyebrow{color:var(--green);}
+  .greet h2{margin:2px 0 0;font-size:30px;}
+  .ready-pill{display:inline-flex;align-items:center;gap:7px;background:var(--green);color:var(--line);padding:7px 13px;border-radius:30px;font-weight:800;font-size:12px;letter-spacing:.04em;margin-top:10px;}
+  .ready-pill .dot{width:10px;height:10px;border-radius:50%;background:#7BE06A;box-shadow:0 0 0 3px rgba(123,224,106,.3);}
+
+  .hero{margin-top:14px;background:var(--coral);color:var(--line);min-height:178px;padding:18px;display:flex;flex-direction:column;justify-content:space-between;}
+  .hero .tag{position:relative;z-index:2;align-self:flex-start;background:var(--line);color:var(--coral-deep);font-weight:900;font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:5px 11px;border-radius:20px;}
+  .hero h3{position:relative;z-index:2;font-family:'Fraunces',serif;font-weight:900;font-size:30px;margin:12px 0 3px;line-height:.96;}
+  .hero .sub{position:relative;z-index:2;font-weight:700;font-size:13px;opacity:.95;}
+  .hero .go{position:relative;z-index:2;margin-top:14px;background:var(--ink);color:var(--line);border:none;border-radius:15px;padding:14px;font-weight:900;font-size:15px;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;}
+
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;}
+  .mini{min-height:128px;padding:14px;color:var(--line);display:flex;flex-direction:column;justify-content:space-between;}
+  .mini.run{background:var(--blue);} .mini.rehab{background:var(--orange);}
+  .mini .lab{position:relative;z-index:2;font-weight:900;font-size:11px;letter-spacing:.12em;text-transform:uppercase;}
+  .mini .big{position:relative;z-index:2;font-family:'Fraunces',serif;font-weight:900;font-size:23px;line-height:.95;}
+  .mini .big small{display:block;font-size:11px;font-family:'Archivo';font-weight:700;opacity:.9;margin-top:3px;}
+  .mini .chk{position:relative;z-index:2;align-self:flex-end;width:26px;height:26px;border-radius:50%;border:2.5px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:13px;}
+  .mini .chk.on{background:var(--line);color:var(--orange);}
+
+  .nav{display:flex;justify-content:space-around;align-items:center;background:var(--ink);padding:11px 8px 15px;}
+  .nav a{color:var(--paper);opacity:.45;font-size:11px;display:flex;flex-direction:column;align-items:center;gap:4px;text-decoration:none;font-weight:800;letter-spacing:.06em;text-transform:uppercase;}
+  .nav a svg{width:22px;height:22px;}
+  .nav a.active{opacity:1;}
+  .nav a.active .ic{background:var(--yellow);border-radius:11px;padding:6px;}
+  .nav a.active .ic svg{stroke:var(--ink);}
+
+  /* ===== CHECK-IN ===== */
+  .ci{background:var(--green);flex:1;color:var(--line);}
+  .ci .pad{display:flex;flex-direction:column;height:100%;}
+  .ci-head .eyebrow{opacity:.7;}
+  .ci-head h2{font-family:'Fraunces',serif;font-weight:900;font-size:33px;margin:6px 0 0;line-height:.95;}
+  .ci-head p{font-size:13px;font-weight:600;opacity:.85;margin:8px 0 0;}
+  .q{margin-top:20px;}
+  .q .qlab{font-weight:800;font-size:13px;margin-bottom:11px;opacity:.95;}
+  .char-row{display:flex;gap:7px;}
+  .char{flex:1;border-radius:16px;padding:9px 4px 7px;border:2.5px solid rgba(247,241,226,.35);background:rgba(247,241,226,.05);display:flex;flex-direction:column;align-items:center;gap:5px;}
+  .char.sel{background:var(--yellow);border-color:var(--yellow);}
+  .char svg{width:38px;height:38px;}
+  .char b{font-size:9px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--line);}
+  .char.sel b{color:var(--ink);}
+  .toggle-row{display:flex;gap:10px;}
+  .tg{flex:1;border-radius:15px;padding:13px;font-weight:800;font-size:13px;border:2.5px solid rgba(247,241,226,.35);display:flex;align-items:center;gap:8px;background:rgba(247,241,226,.05);}
+  .tg.on{background:var(--coral);border-color:var(--coral);}
+  .ci-go{margin-top:auto;background:var(--line);color:var(--green-deep);border:none;border-radius:18px;padding:16px;font-weight:900;font-size:16px;font-family:inherit;cursor:pointer;}
+
+  /* ===== WORKOUT ===== */
+  .wk-bar{background:var(--ink);color:var(--line);padding:13px 16px 12px;}
+  .wk-bar .row{display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:12px;letter-spacing:.06em;}
+  .wk-bar .row .x{width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;}
+  .progress{display:flex;gap:5px;margin-top:9px;}
+  .progress i{flex:1;height:5px;border-radius:3px;background:rgba(247,241,226,.22);}
+  .progress i.done{background:var(--yellow);}
+
+  .wk-head{background:var(--coral);color:var(--line);padding:15px 16px;position:relative;overflow:hidden;}
+  .wk-head .motif{opacity:.5;}
+  .wk-head h3{position:relative;z-index:2;font-family:'Fraunces',serif;font-weight:900;font-size:26px;margin:0;}
+  .wk-head .cue{position:relative;z-index:2;font-size:12px;font-weight:600;opacity:.92;line-height:1.3;margin-top:4px;}
+
+  .sets{padding:13px 16px 0;display:flex;flex-direction:column;gap:9px;}
+  .setcard{border-radius:16px;border:2.5px solid var(--ink);padding:11px 13px;display:flex;align-items:center;gap:11px;background:var(--paper-2);}
+  .setcard.done{background:var(--green);border-color:var(--green);color:var(--line);}
+  .setcard .n{width:28px;height:28px;border-radius:9px;background:var(--ink);color:var(--paper);font-weight:900;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;}
+  .setcard.done .n{background:var(--line);color:var(--green);}
+  .setcard .info{flex:1;}
+  .setcard .info b{font-size:15px;font-family:'Fraunces',serif;}
+  .setcard .info small{display:block;font-weight:700;font-size:10px;opacity:.7;letter-spacing:.04em;text-transform:uppercase;}
+  .setcard .chk{font-size:17px;}
+
+  /* active set: the hero of the page */
+  .active-set{margin:13px 16px 0;background:var(--yellow);border:3px solid var(--ink);border-radius:20px;padding:14px 14px 16px;}
+  .active-set .alab{font-weight:900;font-size:11px;letter-spacing:.1em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;}
+  .active-set .alab span:last-child{background:var(--ink);color:var(--yellow);padding:4px 9px;border-radius:20px;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;}
+  .field{background:var(--paper);border:2.5px solid var(--ink);border-radius:15px;padding:9px 6px 10px;text-align:center;}
+  .field .flab{font-weight:800;font-size:9px;letter-spacing:.12em;text-transform:uppercase;opacity:.6;}
+  .stepper{display:flex;align-items:center;gap:9px;justify-content:center;margin-top:4px;}
+  .stepper button{width:34px;height:34px;border-radius:11px;border:2.5px solid var(--ink);background:var(--paper-2);font-size:20px;font-weight:900;font-family:inherit;line-height:1;cursor:pointer;}
+  .stepper .val{font-family:'Fraunces',serif;font-weight:900;font-size:34px;min-width:42px;text-align:center;}
+
+  .wk-foot{padding:12px 16px 16px;margin-top:auto;}
+  .rest{display:flex;align-items:center;gap:12px;background:var(--blue);color:var(--line);border-radius:16px;padding:11px 14px;margin-bottom:10px;}
+  .rest .tring{width:44px;height:44px;border-radius:50%;border:4px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:13px;flex-shrink:0;}
+  .rest .rt b{font-family:'Fraunces',serif;font-size:16px;display:block;}
+  .rest .rt small{font-size:11px;font-weight:700;opacity:.9;}
+  .rest .skip{margin-left:auto;background:rgba(0,0,0,.18);border:none;color:var(--line);font-weight:800;font-size:12px;padding:8px 12px;border-radius:11px;font-family:inherit;}
+  .log-btn{width:100%;background:var(--ink);color:var(--line);border:none;border-radius:17px;padding:16px;font-weight:900;font-size:16px;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;}
+
+  .caption{color:var(--paper);text-align:center;font-size:12px;opacity:.72;margin:10px auto 0;max-width:300px;line-height:1.4;}
+</style>
+</head>
+<body>
+
+<header class="page-head">
+  <div class="kicker">Lift · visual direction — v2</div>
+  <h1>Bold Color-Block</h1>
+  <p>Retro color-block system. Courts dropped for motifs that match the work: a barbell for lifting, a route line for running, a resistance band for rehab. Pain scale is a cast of cartoon characters, not emoji. Workout page rebuilt around fast set-logging.</p>
+  <div class="swatches">
+    <span style="background:#E8472B"></span><span style="background:#1F5C3D"></span>
+    <span style="background:#2E9BD6"></span><span style="background:#F4C53A"></span>
+    <span style="background:#EE7B30"></span><span style="background:#F3ECD8"></span>
+    <span style="background:#15201B"></span>
+  </div>
+</header>
+
+<div class="frames">
+
+  <!-- ===== TODAY ===== -->
+  <div class="device-wrap">
+    <p class="device-label">01 · Today</p>
+    <div class="phone"><div class="screen">
+      <div class="notch"></div>
+      <div class="statusbar"><span>9:41</span><span>Wi-Fi 100%</span></div>
+      <div class="scroll">
+        <div class="pad" style="flex:1;">
+          <div class="top-row">
+            <div class="badge"><b>P2 · D5</b><span>Cycle day</span></div>
+            <div class="avatar">B</div>
+          </div>
+          <div class="greet">
+            <div class="eyebrow">Monday, Jun 15</div>
+            <h2 class="display">Good morning, Ben.</h2>
+            <div class="ready-pill"><span class="dot"></span> READY · GREEN</div>
+          </div>
+
+          <!-- hero: lifting — barbell motif -->
+          <div class="panel hero">
+            <svg class="motif" viewBox="0 0 300 178" preserveAspectRatio="xMidYMid slice">
+              <g stroke="#F7F1E2" stroke-width="3" fill="none" opacity="0.5">
+                <line x1="20" y1="150" x2="280" y2="150"/>
+                <rect x="40" y="128" width="14" height="44" rx="3"/>
+                <rect x="60" y="118" width="16" height="64" rx="3"/>
+                <rect x="224" y="118" width="16" height="64" rx="3"/>
+                <rect x="246" y="128" width="14" height="44" rx="3"/>
+              </g>
+            </svg>
+            <span class="tag">Gym day 1 · Lift</span>
+            <div>
+              <h3>Today's Lift</h3>
+              <div class="sub">4 lifts · ~38 min · 1 finisher</div>
+            </div>
+            <button class="go">Start workout →</button>
+          </div>
+
+          <div class="duo">
+            <!-- run: route line motif -->
+            <div class="panel mini run">
+              <svg class="motif" viewBox="0 0 140 128" preserveAspectRatio="xMidYMid slice">
+                <path d="M16 104 C 40 70, 30 50, 60 48 S 110 40, 120 18" stroke="#F7F1E2" stroke-width="3.5" fill="none" stroke-dasharray="2 9" stroke-linecap="round" opacity="0.65"/>
+                <circle cx="16" cy="104" r="5" fill="#F7F1E2" opacity="0.65"/>
+                <circle cx="120" cy="18" r="5" fill="#F7F1E2" opacity="0.65"/>
+              </svg>
+              <div class="lab">Run</div>
+              <div class="big">2.0 mi<small>easy · cadence 170</small></div>
+              <div class="chk">○</div>
+            </div>
+            <!-- rehab: band/ROM motif -->
+            <div class="panel mini rehab">
+              <svg class="motif" viewBox="0 0 140 128" preserveAspectRatio="xMidYMid slice">
+                <path d="M14 60 q 9 -22 18 0 t 18 0 t 18 0 t 18 0 t 18 0 t 18 0" stroke="#F7F1E2" stroke-width="3.5" fill="none" stroke-linecap="round" opacity="0.6"/>
+                <path d="M22 96 A 48 48 0 0 1 118 96" stroke="#F7F1E2" stroke-width="3.5" fill="none" opacity="0.45"/>
+              </svg>
+              <div class="lab">Rehab</div>
+              <div class="big">Spanish<br>squat</div>
+              <div class="chk on">✓</div>
+            </div>
+          </div>
+        </div>
+        <nav class="nav">
+          <a class="active" href="#"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#15201B" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>Today</a>
+          <a href="#"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#F3ECD8" stroke-width="2.2"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M14 6l3 3"/></svg></span>Check-in</a>
+          <a href="#"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#F3ECD8" stroke-width="2.2"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/></svg></span>Calendar</a>
+          <a href="#"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#F3ECD8" stroke-width="2.2"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/></svg></span>Stats</a>
+        </nav>
+      </div>
+    </div></div>
+    <p class="caption">Glance: who/where am I (badge + readiness), and the day's three jobs — lift hero with a Start, run + rehab as a quick-status duo.</p>
+  </div>
+
+  <!-- ===== CHECK-IN ===== -->
+  <div class="device-wrap">
+    <p class="device-label">02 · Morning check-in</p>
+    <div class="phone"><div class="screen">
+      <div class="notch"></div>
+      <div class="ci panel" style="border-radius:0;">
+        <div class="pad">
+          <div class="ci-head" style="margin-top:18px;">
+            <div class="eyebrow">Morning check-in</div>
+            <h2>Let's check in.</h2>
+            <p>Takes 10 seconds. It tunes today's plan.</p>
+          </div>
+
+          <div class="q">
+            <div class="qlab">How's the knee this morning?</div>
+            <div class="char-row">
+              <!-- 1 calm round -->
+              <div class="char sel">
+                <svg viewBox="0 0 40 40"><rect x="6" y="8" width="28" height="26" rx="13" fill="#EE7B30"/><circle cx="15" cy="20" r="2.3" fill="#15201B"/><circle cx="25" cy="20" r="2.3" fill="#15201B"/><path d="M14 26q6 5 12 0" stroke="#15201B" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
+                <b>Good</b>
+              </div>
+              <!-- 2 soft squish -->
+              <div class="char">
+                <svg viewBox="0 0 40 40"><path d="M7 18q0-10 13-10t13 10q0 10-13 10T7 18z" fill="#F4C53A"/><circle cx="15" cy="17" r="2.2" fill="#15201B"/><circle cx="25" cy="17" r="2.2" fill="#15201B"/><path d="M15 23q5 3 10 0" stroke="#15201B" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>
+                <b>Mild</b>
+              </div>
+              <!-- 3 wavy neutral -->
+              <div class="char">
+                <svg viewBox="0 0 40 40"><path d="M8 12h24v12q-3 4-6 0t-6 0t-6 0t-6 0z" fill="#2E9BD6"/><circle cx="15" cy="16" r="2.2" fill="#15201B"/><circle cx="25" cy="16" r="2.2" fill="#15201B"/><path d="M15 22h10" stroke="#15201B" stroke-width="2.2" stroke-linecap="round"/></svg>
+                <b>Nagging</b>
+              </div>
+              <!-- 4 bumpy worried -->
+              <div class="char">
+                <svg viewBox="0 0 40 40"><path d="M9 20q-2-6 4-7 0-6 7-5 5-3 9 3 6 0 4 7 3 5-3 8-5 4-9 0-7 2-9-3-3-3 0-6z" fill="#EE7B30"/><circle cx="15" cy="18" r="2.2" fill="#15201B"/><circle cx="25" cy="18" r="2.2" fill="#15201B"/><path d="M15 26q5-3 10 0" stroke="#15201B" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>
+                <b>Sore</b>
+              </div>
+              <!-- 5 spiky sharp -->
+              <div class="char">
+                <svg viewBox="0 0 40 40"><path d="M20 3l4 7 8-3-3 8 7 4-7 4 3 8-8-3-4 7-4-7-8 3 3-8-7-4 7-4-3-8 8 3z" fill="#E8472B"/><circle cx="16" cy="19" r="2" fill="#15201B"/><circle cx="24" cy="19" r="2" fill="#15201B"/><path d="M16 26q4-4 8 0" stroke="#15201B" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>
+                <b>Sharp</b>
+              </div>
+            </div>
+          </div>
+
+          <div class="q">
+            <div class="qlab">Any swelling or fullness?</div>
+            <div class="toggle-row">
+              <div class="tg on">✓&nbsp; Yes, puffy</div>
+              <div class="tg">○&nbsp; Feels normal</div>
+            </div>
+          </div>
+
+          <div class="q">
+            <div class="qlab">Energy for today</div>
+            <div class="toggle-row">
+              <div class="tg">Low</div>
+              <div class="tg on">Steady</div>
+              <div class="tg">Charged</div>
+            </div>
+          </div>
+
+          <button class="ci-go">Save &amp; see today →</button>
+        </div>
+      </div>
+    </div></div>
+    <p class="caption">Core job is honest, fast input. Pain as a cast of characters that get spikier with severity; chunky toggles for swelling + energy. One screen, one save.</p>
+  </div>
+
+  <!-- ===== WORKOUT ===== -->
+  <div class="device-wrap">
+    <p class="device-label">03 · Workout · log set</p>
+    <div class="phone"><div class="screen">
+      <div class="notch"></div>
+      <div class="scroll">
+        <div class="wk-bar">
+          <div class="row"><span>DAY 1 · EXERCISE 2 / 4</span><span class="x">✕</span></div>
+          <div class="progress"><i class="done"></i><i class="done"></i><i></i><i></i></div>
+        </div>
+        <div class="wk-head">
+          <svg class="motif" viewBox="0 0 300 70" preserveAspectRatio="xMidYMid slice">
+            <g stroke="#F7F1E2" stroke-width="3" fill="none">
+              <line x1="30" y1="35" x2="270" y2="35"/>
+              <rect x="50" y="18" width="12" height="34" rx="3"/><rect x="68" y="10" width="14" height="50" rx="3"/>
+              <rect x="218" y="10" width="14" height="50" rx="3"/><rect x="238" y="18" width="12" height="34" rx="3"/>
+            </g>
+          </svg>
+          <h3>Bench press</h3>
+          <div class="cue">Feet through the floor — drive down for a stable base.</div>
+        </div>
+
+        <div class="sets">
+          <div class="setcard done">
+            <div class="n">1</div>
+            <div class="info"><b>95 lb × 12</b><small>logged</small></div>
+            <div class="chk">✓</div>
+          </div>
+          <div class="setcard" style="opacity:.55;">
+            <div class="n">3</div>
+            <div class="info"><b>95 lb</b><small>up next · target 12</small></div>
+            <div class="chk">○</div>
+          </div>
+        </div>
+
+        <!-- active set = page hero -->
+        <div class="active-set">
+          <div class="alab"><span>Set 2 of 3</span><span>GOAL 12</span></div>
+          <div class="grid2">
+            <div class="field">
+              <div class="flab">Weight</div>
+              <div class="stepper"><button>−</button><div class="val">95</div><button>+</button></div>
+            </div>
+            <div class="field">
+              <div class="flab">Reps</div>
+              <div class="stepper"><button>−</button><div class="val">12</div><button>+</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="wk-foot">
+          <div class="rest">
+            <div class="tring">1:12</div>
+            <div class="rt"><b>Rest</b><small>180s between sets</small></div>
+            <button class="skip">Skip</button>
+          </div>
+          <button class="log-btn">Log set 2 ✓</button>
+        </div>
+      </div>
+    </div></div>
+    <p class="caption">Header trimmed to a slim bar + compact title so the weight/reps steppers are the hero. Logged set collapses, next set previews, rest timer sits with the log button.</p>
+  </div>
+
+</div>
+</body>
+</html>
