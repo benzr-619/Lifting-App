@@ -348,18 +348,41 @@ async function loadBootData() {
     if (planRes.error) throw planRes.error;
     APP.todayPlan = planRes.data;
 
-    // Read seam buffer state
+    // Seam buffer detection — derived from DB cursor at every boot, not from transition event.
+    // Condition: cycle_day just rolled to 1 (same-phase repeat), the outgoing day-8 of this
+    // phase had a run (SEAM_BUFFER_OUTGOING_DAYS), and the incoming day 1 also has a run.
+    // Using same-phase outgoing because the named seam crossings are all same-phase repeats.
     APP.isBufferDay = false;
     APP.bufferRehab = null;
-    var bufRaw = localStorage.getItem('lift_buffer_day');
-    if (bufRaw) {
-      try {
-        var buf = JSON.parse(bufRaw);
-        if (buf.date === APP.today && !buf.done) {
-          APP.isBufferDay = true;
-          APP.bufferRehab = buf.rehab;
-        }
-      } catch(e) { localStorage.removeItem('lift_buffer_day'); }
+    var samePhaseOutgoing = (APP.planState.current_phase - 1) * 8 + 8;
+    var bufferCondition = APP.planState.current_cycle_day === 1
+      && !!APP.todayPlan.run_miles
+      && !!APP.todayPlan.is_lift_day
+      && !!SEAM_BUFFER_OUTGOING_DAYS[samePhaseOutgoing];
+    if (bufferCondition) {
+      // Check if user already acted on the buffer today
+      var bufDone = false;
+      var bufRaw = localStorage.getItem('lift_buffer_day');
+      if (bufRaw) {
+        try {
+          var buf = JSON.parse(bufRaw);
+          if (buf.date === APP.today && buf.done) bufDone = true;
+        } catch(e) { localStorage.removeItem('lift_buffer_day'); }
+      }
+      if (!bufDone) {
+        APP.isBufferDay = true;
+        // Query nearest preceding lift-only day for lift-appropriate rehab
+        var incomingDayNum = (APP.planState.current_phase - 1) * 8 + 1;
+        var adjRes = await db.from('cycle_plan')
+          .select('rehab_exercise,rehab_timing')
+          .eq('is_lift_day', true)
+          .is('run_miles', null)
+          .lt('day_number', incomingDayNum)
+          .order('day_number', {ascending: false})
+          .limit(1)
+          .maybeSingle();
+        APP.bufferRehab = adjRes.data || null;
+      }
     }
 
     // Load readiness from view
@@ -846,9 +869,6 @@ async function advanceCycleDay() {
     await updatePlanState({ current_cycle_day: day + 1 });
   } else {
     // Rolling 8→1: evaluate the completed cycle
-    var outgoingDayNum = (ps.current_phase - 1) * 8 + 8;
-    var isSeamBuffer = !!SEAM_BUFFER_OUTGOING_DAYS[outgoingDayNum];
-
     var clean = ps.current_cycle_clean &&
                 ps.current_cycle_rest_days <= pc.max_rest_days_per_cycle;
 
@@ -883,27 +903,7 @@ async function advanceCycleDay() {
     var newPhase = APP.planState.current_phase;
     var newDayNum = (newPhase - 1) * 8 + 1;
     var planRes = await db.from('cycle_plan').select('*').eq('day_number', newDayNum).single();
-    if (!planRes.error) {
-      APP.todayPlan = planRes.data;
-
-      // Seam buffer: both the outgoing and incoming days have a run, creating an
-      // unintended back-to-back run stretch. Flag incoming day 1 as an optional buffer lift.
-      if (isSeamBuffer) {
-        var adjRes = await db.from('cycle_plan')
-          .select('rehab_exercise,rehab_timing')
-          .eq('is_lift_day', true)
-          .is('run_miles', null)
-          .lt('day_number', newDayNum)
-          .order('day_number', {ascending: false})
-          .limit(1)
-          .maybeSingle();
-        localStorage.setItem('lift_buffer_day', JSON.stringify({
-          date: APP.today,
-          rehab: adjRes.data || null,
-          done: false
-        }));
-      }
-    }
+    if (!planRes.error) APP.todayPlan = planRes.data;
   }
 }
 
@@ -1386,12 +1386,7 @@ function rBufferDayCard() {
 }
 
 function skipBufferLift() {
-  try {
-    var bRaw = localStorage.getItem('lift_buffer_day');
-    var bObj = bRaw ? JSON.parse(bRaw) : {};
-    bObj.done = true;
-    localStorage.setItem('lift_buffer_day', JSON.stringify(bObj));
-  } catch(e) {}
+  localStorage.setItem('lift_buffer_day', JSON.stringify({ date: APP.today, done: true }));
   APP.isBufferDay = false;
   render();
 }
@@ -2170,14 +2165,9 @@ async function saveCheckin() {
 
 async function startWorkout() {
   await requestNotificationPermission();
-  // Choosing to lift on a buffer day: mark the buffer consumed so run card becomes visible
+  // Choosing to lift on a buffer day: stamp done so the buffer isn't re-shown on reload
   if (APP.isBufferDay) {
-    try {
-      var bRaw = localStorage.getItem('lift_buffer_day');
-      var bObj = bRaw ? JSON.parse(bRaw) : {};
-      bObj.done = true;
-      localStorage.setItem('lift_buffer_day', JSON.stringify(bObj));
-    } catch(e) {}
+    localStorage.setItem('lift_buffer_day', JSON.stringify({ date: APP.today, done: true }));
     APP.isBufferDay = false;
   }
   if (!APP.sessionId) {
