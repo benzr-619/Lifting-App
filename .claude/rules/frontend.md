@@ -63,9 +63,17 @@ ES5-flavored throughout: `var`, `function`, `.map/.forEach`, string concatenatio
 - Today card shows amber "Resume →" with exercise count when `APP.sessionId !== null && !liftCompletedToday`.
 
 ## Seam buffer day (`isBufferDay`, `bufferRehab`)
-At cycle 8→1 boundary crossings where the outgoing day AND incoming day 1 both have `run_miles`, the incoming day is flagged as a buffer day. Detected in `advanceCycleDay()` using the static `SEAM_BUFFER_OUTGOING_DAYS = {16,40,48,56}` lookup. Persisted to `localStorage('lift_buffer_day')` as `{date, rehab, done}`. Read into `APP.isBufferDay` and `APP.bufferRehab` in `loadBootData()` (after `APP.todayPlan` is set).
+At cycle 8→1 boundary crossings where the outgoing day AND incoming day 1 both have `run_miles` (seam days: day_numbers 16, 40, 48, 56 = `SEAM_BUFFER_OUTGOING_DAYS`), a standalone buffer day is inserted between them. `current_cycle_day` stays at **8** through the buffer day — the 8→1 roll is deferred to the calendar day after.
 
-UI on buffer days: blue dashed lift card ("Optional"), no run card, rehab card uses the adjacent lift-only day's rehab (from `bufferRehab`). User can tap "Lift →" (calls `startWorkout()`, which marks `done=true` and clears `isBufferDay`) or "Skip — unlock today's run" (calls `skipBufferLift()`, which marks `done=true` and re-renders, revealing the run card from `todayPlan`). Skipping the lift has no effect on the cycle cursor, rest days, or cleanliness.
+**Detection** (`loadBootData`, runs before advance-pending processing): if `current_cycle_day === 8` and today's phase is a seam boundary phase, query `daily_log` for the most recent row with `plan_phase = current_phase, plan_cycle_day = 8, run_completed = true, rehab_completed = true`. Compute `seaBufElapsed` = days between that anchor and today.
+- `seaBufElapsed === 1` → today is the buffer day: set `APP.isBufferDay = true`, suppress `lift_advance_pending` (delete it), query adjacent rehab.
+- `seaBufElapsed >= 2` → buffer day has passed: apply deferred 8→1 roll via `advanceCycleDay()` if no pending was already applied.
+
+**Buffer day state**: `APP.isBufferDay = true`, `APP.bufferRehab` = nearest preceding lift-only (is_lift_day=true, run_miles IS NULL) day's rehab, queried via `.lte('day_number', outgoingDayNum)`. No localStorage used — state is fully DB-derived on every boot.
+
+**UI on buffer days**: blue dashed lift card ("Optional"), **no run card**, rehab card uses `bufferRehab` via `activeRehabLabel()`/`activeRehabTiming()`. Tapping "Lift →" calls `startWorkout()` as normal — `finishSession()` writes a `lift_advance_pending` for the gym_day advance, which is applied the next morning alongside `advanceCycleDay()`. Skipping (doing nothing) has zero effect on cycle cursor, rest days, or cleanliness — the deferred roll fires at next boot when `seaBufElapsed >= 2`.
+
+Exercise loading and lift card rendering both guard on `APP.todayPlan.is_lift_day || APP.isBufferDay` since the cursor day (e.g., day 16) has `is_lift_day = false`.
 
 All `rehabMatchExercise(APP.todayPlan.rehab_exercise)` calls use `activeRehabLabel()` instead; all `rehab_timing` references use `activeRehabTiming()`. This covers render intervals, `goRehab`, `rehabTimerSkip`, `rehabSkipRest`, `rehabWeightAdj`, `rehabLogSet`, and `rRehab`.
 

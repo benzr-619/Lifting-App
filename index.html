@@ -318,7 +318,32 @@ async function loadBootData() {
     APP.planConfig = configRes.data;
     APP.todayLog   = logRes.data; // null = not checked in
 
+    // Seam buffer detection — runs BEFORE advance-pending to allow buffer-day interception.
+    // Cursor stays at 8 through the buffer day; the 8→1 roll is deferred to the day after.
+    // Detection: if cursor is at day 8 of a seam-boundary phase, check daily_log for the
+    // most recent completed day-8 anchor (run+rehab done). elapsed=1 → today is buffer day;
+    // elapsed≥2 → buffer day has passed, apply the deferred roll.
+    var seaBufElapsed = -1;
+    var samePhaseOutgoingNum = (APP.planState.current_phase - 1) * 8 + 8;
+    if (APP.planState.current_cycle_day === 8 && SEAM_BUFFER_OUTGOING_DAYS[samePhaseOutgoingNum]) {
+      var anchorRes = await db.from('daily_log')
+        .select('log_date')
+        .eq('plan_phase', APP.planState.current_phase)
+        .eq('plan_cycle_day', 8)
+        .eq('run_completed', true)
+        .eq('rehab_completed', true)
+        .order('log_date', {ascending: false})
+        .limit(1)
+        .maybeSingle();
+      if (anchorRes.data) {
+        var anchorDate = new Date(anchorRes.data.log_date + 'T00:00:00');
+        var todayDate  = new Date(APP.today + 'T00:00:00');
+        seaBufElapsed  = Math.round((todayDate - anchorDate) / 86400000);
+      }
+    }
+
     // Handle deferred day-advance (set when workout completed, applied next calendar day)
+    var advanceApplied = false;
     var pendingRaw = localStorage.getItem('lift_advance_pending');
     if (pendingRaw) {
       try {
@@ -330,11 +355,17 @@ async function loadBootData() {
           // Advance was already applied to DB — pending is stale, discard it
           localStorage.removeItem('lift_advance_pending');
         } else if (pending.date < APP.today) {
-          // New day — apply the deferred advance now
-          await updatePlanState({ current_gym_day: pending.nextGymDay });
-          await advanceCycleDay();
-          localStorage.removeItem('lift_advance_pending');
-          // APP.planState is updated in-memory by the calls above
+          if (seaBufElapsed === 1) {
+            // Buffer day: pending is from yesterday's day-8 completion.
+            // Suppress the premature 8→1 roll — defer to tomorrow.
+            localStorage.removeItem('lift_advance_pending');
+          } else {
+            // New day — apply the deferred advance now
+            await updatePlanState({ current_gym_day: pending.nextGymDay });
+            await advanceCycleDay();
+            localStorage.removeItem('lift_advance_pending');
+            advanceApplied = true;
+          }
         }
       } catch(e) {
         // Corrupted entry — discard it
@@ -342,47 +373,34 @@ async function loadBootData() {
       }
     }
 
-    // Compute cycle_plan day_number from cursor
+    // Deferred 8→1 roll for the day after the buffer day when no pending was applied.
+    // Handles lost-pending (cache cleared) and no-lift-on-buffer-day cases.
+    if (!advanceApplied && seaBufElapsed >= 2 && APP.planState.current_cycle_day === 8) {
+      await advanceCycleDay();
+    }
+
+    // Compute cycle_plan day_number from cursor (after any advance applied above)
     var dayNum = (APP.planState.current_phase - 1) * 8 + APP.planState.current_cycle_day;
     var planRes = await db.from('cycle_plan').select('*').eq('day_number', dayNum).single();
     if (planRes.error) throw planRes.error;
     APP.todayPlan = planRes.data;
 
-    // Seam buffer detection — derived from DB cursor at every boot, not from transition event.
-    // Condition: cycle_day just rolled to 1 (same-phase repeat), the outgoing day-8 of this
-    // phase had a run (SEAM_BUFFER_OUTGOING_DAYS), and the incoming day 1 also has a run.
-    // Using same-phase outgoing because the named seam crossings are all same-phase repeats.
+    // Set buffer day state — only when seaBufElapsed === 1 (cursor still at 8)
     APP.isBufferDay = false;
     APP.bufferRehab = null;
-    var samePhaseOutgoing = (APP.planState.current_phase - 1) * 8 + 8;
-    var bufferCondition = APP.planState.current_cycle_day === 1
-      && !!APP.todayPlan.run_miles
-      && !!APP.todayPlan.is_lift_day
-      && !!SEAM_BUFFER_OUTGOING_DAYS[samePhaseOutgoing];
-    if (bufferCondition) {
-      // Check if user already acted on the buffer today
-      var bufDone = false;
-      var bufRaw = localStorage.getItem('lift_buffer_day');
-      if (bufRaw) {
-        try {
-          var buf = JSON.parse(bufRaw);
-          if (buf.date === APP.today && buf.done) bufDone = true;
-        } catch(e) { localStorage.removeItem('lift_buffer_day'); }
-      }
-      if (!bufDone) {
-        APP.isBufferDay = true;
-        // Query nearest preceding lift-only day for lift-appropriate rehab
-        var incomingDayNum = (APP.planState.current_phase - 1) * 8 + 1;
-        var adjRes = await db.from('cycle_plan')
-          .select('rehab_exercise,rehab_timing')
-          .eq('is_lift_day', true)
-          .is('run_miles', null)
-          .lt('day_number', incomingDayNum)
-          .order('day_number', {ascending: false})
-          .limit(1)
-          .maybeSingle();
-        APP.bufferRehab = adjRes.data || null;
-      }
+    if (seaBufElapsed === 1) {
+      APP.isBufferDay = true;
+      // Query nearest preceding lift-only day (no run) for lift-appropriate rehab
+      var outgoingDayNum = (APP.planState.current_phase - 1) * 8 + 8;
+      var adjRes = await db.from('cycle_plan')
+        .select('rehab_exercise,rehab_timing')
+        .eq('is_lift_day', true)
+        .is('run_miles', null)
+        .lte('day_number', outgoingDayNum)
+        .order('day_number', {ascending: false})
+        .limit(1)
+        .maybeSingle();
+      APP.bufferRehab = adjRes.data || null;
     }
 
     // Load readiness from view
@@ -390,7 +408,7 @@ async function loadBootData() {
     APP.readiness = readRes.data ? readRes.data.readiness : null;
 
     // Load exercises if today is a lift day (which day = independent cursor)
-    if (APP.todayPlan.is_lift_day) {
+    if (APP.todayPlan.is_lift_day || APP.isBufferDay) {
       await loadExercises(APP.planState.current_gym_day);
 
       var tomorrow = new Date(APP.today + 'T00:00:00');
@@ -1218,7 +1236,7 @@ function rToday() {
   // Buffer day banner
   if (APP.isBufferDay) {
     html += '<div class="buffer-banner"><i class="ti ti-arrows-shuffle" style="margin-right:6px"></i>'
-      + 'Back-to-back run seam — lift is optional today. Skip freely, no impact on cycle. Run unlocks after you decide on the lift.'
+      + 'Back-to-back run seam — rest day from running. Lift is optional; no impact on your cycle either way.'
       + '</div>';
   }
 
@@ -1257,7 +1275,7 @@ function rToday() {
   }
 
   // Lift card (if today is a lift day)
-  if (tp.is_lift_day) {
+  if (tp.is_lift_day || APP.isBufferDay) {
     if (APP.isBufferDay) {
       html += rBufferDayCard();
     } else {
@@ -1378,17 +1396,8 @@ function rBufferDayCard() {
     + (!done ? '<p style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">Lift freely or skip — neither counts against your cycle</p>' : '')
     + '</div>'
     + actionBtn + '</div>';
-  if (!done && !inProgress) {
-    html += '<button onclick="event.stopPropagation();skipBufferLift()" style="width:100%;margin-top:10px;padding:10px;background:transparent;border:0.5px solid var(--color-border);border-radius:var(--radius-md);font-size:13px;color:var(--color-text-secondary)">Skip — unlock today\'s run</button>';
-  }
   html += '</div>';
   return html;
-}
-
-function skipBufferLift() {
-  localStorage.setItem('lift_buffer_day', JSON.stringify({ date: APP.today, done: true }));
-  APP.isBufferDay = false;
-  render();
 }
 
 function rProgressSummary() {
@@ -2165,11 +2174,6 @@ async function saveCheckin() {
 
 async function startWorkout() {
   await requestNotificationPermission();
-  // Choosing to lift on a buffer day: stamp done so the buffer isn't re-shown on reload
-  if (APP.isBufferDay) {
-    localStorage.setItem('lift_buffer_day', JSON.stringify({ date: APP.today, done: true }));
-    APP.isBufferDay = false;
-  }
   if (!APP.sessionId) {
     try {
       await createSession(APP.planState.current_gym_day);
@@ -2828,7 +2832,7 @@ function toggleProgressionReady() {
 function maybeWriteNonLiftAdvance() {
   // On non-lift days, write the deferred advance when both run and rehab are done.
   // gym_day cursor does not change on non-lift days — only cycle_day advances.
-  if (APP.todayPlan.is_lift_day) return;
+  if (APP.todayPlan.is_lift_day || APP.isBufferDay) return;
   if (!APP.todayLog || !APP.todayLog.run_completed || !APP.todayLog.rehab_completed) return;
   if (localStorage.getItem('lift_advance_pending')) return;
   localStorage.setItem('lift_advance_pending', JSON.stringify({
