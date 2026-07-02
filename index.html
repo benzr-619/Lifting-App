@@ -122,6 +122,17 @@
       font-size: 13px;
       color: var(--color-text-warning);
     }
+
+    /* Buffer day banner */
+    .buffer-banner {
+      background: var(--color-bg-info);
+      border: 0.5px solid var(--color-text-info);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      font-size: 13px;
+      color: var(--color-text-info);
+    }
   </style>
 </head>
 <body>
@@ -193,6 +204,12 @@ var APP = {
 
   // Set true when workout is finished this session
   liftCompletedToday: false,
+
+  // Set true on boundary crossings where outgoing AND incoming day both have run_miles.
+  // Incoming day is shown as an optional buffer lift with lift-appropriate rehab; no run card.
+  // Cleared when user starts the lift or explicitly skips it.
+  isBufferDay: false,
+  bufferRehab: null,   // {rehab_exercise, rehab_timing} from nearest preceding lift-only day
 
   // Set true on set 3 to confirm user is ready to progress weight
   progressionReady: false,
@@ -330,6 +347,20 @@ async function loadBootData() {
     var planRes = await db.from('cycle_plan').select('*').eq('day_number', dayNum).single();
     if (planRes.error) throw planRes.error;
     APP.todayPlan = planRes.data;
+
+    // Read seam buffer state
+    APP.isBufferDay = false;
+    APP.bufferRehab = null;
+    var bufRaw = localStorage.getItem('lift_buffer_day');
+    if (bufRaw) {
+      try {
+        var buf = JSON.parse(bufRaw);
+        if (buf.date === APP.today && !buf.done) {
+          APP.isBufferDay = true;
+          APP.bufferRehab = buf.rehab;
+        }
+      } catch(e) { localStorage.removeItem('lift_buffer_day'); }
+    }
 
     // Load readiness from view
     var readRes = await db.from('v_readiness').select('readiness').maybeSingle();
@@ -532,6 +563,25 @@ async function updatePlanConfig(patch) {
 // Phases 6–7: raised automatically on phase advance — 2.0 mi is too aggressive
 // when easy days are 4–5+ miles.
 var PHASE_DELOAD_RUN_CAP = { 6: 4.0, 7: 4.5 };
+
+// Outgoing cycle day_numbers where the incoming day 1 also has a run,
+// creating back-to-back runs at the seam. Derived from cycle_plan; static.
+var SEAM_BUFFER_OUTGOING_DAYS = {16: true, 40: true, 48: true, 56: true};
+
+// Returns the rehab exercise label to use today.
+// On buffer days, substitutes the adjacent lift-only day's rehab for the run-day rehab.
+function activeRehabLabel() {
+  return (APP.isBufferDay && APP.bufferRehab && APP.bufferRehab.rehab_exercise)
+    ? APP.bufferRehab.rehab_exercise
+    : APP.todayPlan.rehab_exercise;
+}
+
+// Returns the raw rehab_timing string (underscored) for today.
+function activeRehabTiming() {
+  return (APP.isBufferDay && APP.bufferRehab && APP.bufferRehab.rehab_timing)
+    ? APP.bufferRehab.rehab_timing
+    : APP.todayPlan.rehab_timing;
+}
 
 async function updateExerciseState(exerciseId, patch) {
   var { error } = await db
@@ -796,6 +846,9 @@ async function advanceCycleDay() {
     await updatePlanState({ current_cycle_day: day + 1 });
   } else {
     // Rolling 8→1: evaluate the completed cycle
+    var outgoingDayNum = (ps.current_phase - 1) * 8 + 8;
+    var isSeamBuffer = !!SEAM_BUFFER_OUTGOING_DAYS[outgoingDayNum];
+
     var clean = ps.current_cycle_clean &&
                 ps.current_cycle_rest_days <= pc.max_rest_days_per_cycle;
 
@@ -830,7 +883,27 @@ async function advanceCycleDay() {
     var newPhase = APP.planState.current_phase;
     var newDayNum = (newPhase - 1) * 8 + 1;
     var planRes = await db.from('cycle_plan').select('*').eq('day_number', newDayNum).single();
-    if (!planRes.error) APP.todayPlan = planRes.data;
+    if (!planRes.error) {
+      APP.todayPlan = planRes.data;
+
+      // Seam buffer: both the outgoing and incoming days have a run, creating an
+      // unintended back-to-back run stretch. Flag incoming day 1 as an optional buffer lift.
+      if (isSeamBuffer) {
+        var adjRes = await db.from('cycle_plan')
+          .select('rehab_exercise,rehab_timing')
+          .eq('is_lift_day', true)
+          .is('run_miles', null)
+          .lt('day_number', newDayNum)
+          .order('day_number', {ascending: false})
+          .limit(1)
+          .maybeSingle();
+        localStorage.setItem('lift_buffer_day', JSON.stringify({
+          date: APP.today,
+          rehab: adjRes.data || null,
+          done: false
+        }));
+      }
+    }
   }
 }
 
@@ -1059,7 +1132,7 @@ function render() {
         APP.rehabTimerActive = false;
         playTimerDone();
         APP.rehabSetsCompleted[APP.rehabActiveSet] = true;
-        var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+        var ex = rehabMatchExercise(activeRehabLabel());
         var nextSet = APP.rehabActiveSet + 1;
         if (nextSet < ex.sets) {
           // Start 2-minute rest before next set
@@ -1084,7 +1157,7 @@ function render() {
         cancelTimerNotification();
         APP.rehabRestActive = false;
         APP.rehabRestEndTime = null;
-        var ex2 = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+        var ex2 = rehabMatchExercise(activeRehabLabel());
         APP.rehabActiveSet = APP.rehabSetsCompleted.indexOf(false);
         if (APP.rehabActiveSet < 0) APP.rehabActiveSet = ex2.sets - 1;
         APP.rehabTimerRemaining = ex2.duration;
@@ -1142,9 +1215,17 @@ function rToday() {
 
   html += '<div style="height:14px"></div>';
 
+  // Buffer day banner
+  if (APP.isBufferDay) {
+    html += '<div class="buffer-banner"><i class="ti ti-arrows-shuffle" style="margin-right:6px"></i>'
+      + 'Back-to-back run seam — lift is optional today. Skip freely, no impact on cycle. Run unlocks after you decide on the lift.'
+      + '</div>';
+  }
+
   // Rehab card helpers (used below, possibly before or after run/lift)
-  var rehabLabel = tp.rehab_exercise;
-  var rehabTiming = tp.rehab_timing.replace(/_/g, ' ');
+  // On buffer days: use the nearest preceding lift-only day's rehab instead of the run-day rehab.
+  var rehabLabel = activeRehabLabel();
+  var rehabTiming = activeRehabTiming().replace(/_/g, ' ');
   var suppressedPlyo = ps.in_deload && cfg.deload_suppress_plyo &&
     rehabLabel.toLowerCase().indexOf('plyo') !== -1;
   if (suppressedPlyo) {
@@ -1155,13 +1236,13 @@ function rToday() {
   var rehabSubval = rehabEx.label || null;
   var rehabCard = rRehabCard(rehabLabel, rehabTiming, rehabSubval, rehabLogged);
 
-  var rehabBefore = tp.rehab_timing.indexOf('before') === 0;
+  var rehabBefore = activeRehabTiming().indexOf('before') === 0;
 
   // Rehab first if it comes before run/lift
   if (rehabBefore) html += rehabCard;
 
-  // Run card (if today has a run)
-  if (tp.run_miles !== null) {
+  // Run card — suppressed on buffer days (unlocks after lift decision)
+  if (tp.run_miles !== null && !APP.isBufferDay) {
     // deload_run_mile_cap is read from plan_config at runtime.
     // Automatically raised to 4.0 mi (Phase 6) / 4.5 mi (Phase 7) on phase advance
     // via PHASE_DELOAD_RUN_CAP — no manual intervention needed.
@@ -1177,10 +1258,14 @@ function rToday() {
 
   // Lift card (if today is a lift day)
   if (tp.is_lift_day) {
-    var liftNames = APP.exercises
-      .filter(function(e) { return !e.is_optional; })
-      .map(function(e) { return e.name; });
-    html += rLiftCard(ps.current_gym_day, liftNames);
+    if (APP.isBufferDay) {
+      html += rBufferDayCard();
+    } else {
+      var liftNames = APP.exercises
+        .filter(function(e) { return !e.is_optional; })
+        .map(function(e) { return e.name; });
+      html += rLiftCard(ps.current_gym_day, liftNames);
+    }
   }
 
   // Rehab after run/lift if timing is after
@@ -1271,6 +1356,46 @@ function rLiftCard(gymDay, exerciseNames) {
     + '</div></div>';
 }
 
+function rBufferDayCard() {
+  var done       = APP.liftCompletedToday;
+  var inProgress = !done && APP.sessionId !== null;
+  var opa = done ? ';opacity:0.65' : '';
+  var actionBtn;
+  if (done) {
+    actionBtn = '<div style="width:36px;height:36px;border-radius:50%;background:var(--color-text);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-check" style="font-size:18px;color:var(--color-bg)"></i></div>';
+  } else if (inProgress) {
+    actionBtn = '<span style="font-size:12px;font-weight:500;color:var(--color-text-warning);flex-shrink:0">Resume →</span>';
+  } else {
+    actionBtn = '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--color-text-tertiary)"></i>';
+  }
+  var html = '<div style="background:var(--color-bg);border:0.5px dashed var(--color-text-info);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;cursor:pointer' + opa + '" onclick="' + (done ? '' : 'startWorkout()') + '">'
+    + '<div style="display:flex;align-items:center;gap:12px">'
+    + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-info);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+    + '<i class="ti ti-barbell" style="font-size:20px;color:var(--color-text-info)"></i></div>'
+    + '<div style="flex:1">'
+    + '<p style="font-size:12px;color:var(--color-text-info);margin-bottom:2px">Lift · Optional</p>'
+    + '<p style="font-size:16px;font-weight:500">Day ' + APP.planState.current_gym_day + ' workout</p>'
+    + (!done ? '<p style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">Lift freely or skip — neither counts against your cycle</p>' : '')
+    + '</div>'
+    + actionBtn + '</div>';
+  if (!done && !inProgress) {
+    html += '<button onclick="event.stopPropagation();skipBufferLift()" style="width:100%;margin-top:10px;padding:10px;background:transparent;border:0.5px solid var(--color-border);border-radius:var(--radius-md);font-size:13px;color:var(--color-text-secondary)">Skip — unlock today\'s run</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function skipBufferLift() {
+  try {
+    var bRaw = localStorage.getItem('lift_buffer_day');
+    var bObj = bRaw ? JSON.parse(bRaw) : {};
+    bObj.done = true;
+    localStorage.setItem('lift_buffer_day', JSON.stringify(bObj));
+  } catch(e) {}
+  APP.isBufferDay = false;
+  render();
+}
+
 function rProgressSummary() {
   var ps = APP.planState;
   var pc = APP.planConfig;
@@ -1321,7 +1446,7 @@ function rRehabCard(label, timing, subval, done) {
 
 function rRehab() {
   var tp  = APP.todayPlan;
-  var rawLabel = tp.rehab_exercise;
+  var rawLabel = activeRehabLabel();
   var ps  = APP.planState;
   var cfg = APP.planConfig;
   var suppressedPlyo = ps.in_deload && cfg.deload_suppress_plyo &&
@@ -1340,7 +1465,7 @@ function rRehab() {
     + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-warning);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
     + '<i class="ti ti-activity" style="font-size:20px;color:var(--color-text-warning)"></i></div>'
     + '<div>'
-    + '<p style="font-size:12px;color:var(--color-text-secondary)">Rehab · ' + tp.rehab_timing.replace(/_/g, ' ') + '</p>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary)">Rehab · ' + activeRehabTiming().replace(/_/g, ' ') + '</p>'
     + '<h1 style="font-size:20px;font-weight:600;line-height:1.25">' + rawLabel + '</h1>'
     + '</div></div>';
 
@@ -2045,6 +2170,16 @@ async function saveCheckin() {
 
 async function startWorkout() {
   await requestNotificationPermission();
+  // Choosing to lift on a buffer day: mark the buffer consumed so run card becomes visible
+  if (APP.isBufferDay) {
+    try {
+      var bRaw = localStorage.getItem('lift_buffer_day');
+      var bObj = bRaw ? JSON.parse(bRaw) : {};
+      bObj.done = true;
+      localStorage.setItem('lift_buffer_day', JSON.stringify(bObj));
+    } catch(e) {}
+    APP.isBufferDay = false;
+  }
   if (!APP.sessionId) {
     try {
       await createSession(APP.planState.current_gym_day);
@@ -2741,7 +2876,7 @@ async function toggleRehab() {
 function goRehab() {
   if (!APP.todayLog) { goCheckin(); return; }
   // Init set state for this exercise
-  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  var ex = rehabMatchExercise(activeRehabLabel());
   var numSets = ex.sets || 0;
   if (APP.rehabSetsCompleted.length !== numSets) {
     APP.rehabSetsCompleted = [];
@@ -2787,7 +2922,7 @@ function rehabTimerPause() {
 }
 
 function rehabTimerSkip() {
-  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  var ex = rehabMatchExercise(activeRehabLabel());
   APP.rehabTimerActive = false;
   APP.rehabRestActive = false;
   APP.rehabRestEndTime = null;
@@ -2809,7 +2944,7 @@ function rehabSkipRest() {
   APP.timerInterval = null;
   APP.rehabRestActive = false;
   APP.rehabRestEndTime = null;
-  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  var ex = rehabMatchExercise(activeRehabLabel());
   APP.rehabActiveSet = APP.rehabSetsCompleted.indexOf(false);
   if (APP.rehabActiveSet < 0) APP.rehabActiveSet = ex.sets - 1;
   APP.rehabTimerRemaining = ex.duration;
@@ -2817,7 +2952,7 @@ function rehabSkipRest() {
 }
 
 function rehabWeightAdj(delta) {
-  var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+  var ex = rehabMatchExercise(activeRehabLabel());
   APP.rehabWeight = Math.max(0, APP.rehabWeight + delta);
   if (ex.weightKey) localStorage.setItem(ex.weightKey, APP.rehabWeight);
   render();
@@ -2827,7 +2962,7 @@ function rehabLogSet() {
   var completedCount = APP.rehabSetsCompleted.filter(Boolean).length;
   if (completedCount < APP.rehabSetsCompleted.length) {
     APP.rehabSetsCompleted[completedCount] = true;
-    var ex = rehabMatchExercise(APP.todayPlan.rehab_exercise);
+    var ex = rehabMatchExercise(activeRehabLabel());
     if (ex.weightKey) localStorage.setItem(ex.weightKey, APP.rehabWeight);
     // Start rest timer between sets (60s after set 1, 180s after set 2+)
     var nextSet = completedCount + 1;

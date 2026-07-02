@@ -62,6 +62,13 @@ ES5-flavored throughout: `var`, `function`, `.map/.forEach`, string concatenatio
 - `finishSession()` clears `localStorage('lift_workout_progress')`.
 - Today card shows amber "Resume →" with exercise count when `APP.sessionId !== null && !liftCompletedToday`.
 
+## Seam buffer day (`isBufferDay`, `bufferRehab`)
+At cycle 8→1 boundary crossings where the outgoing day AND incoming day 1 both have `run_miles`, the incoming day is flagged as a buffer day. Detected in `advanceCycleDay()` using the static `SEAM_BUFFER_OUTGOING_DAYS = {16,40,48,56}` lookup. Persisted to `localStorage('lift_buffer_day')` as `{date, rehab, done}`. Read into `APP.isBufferDay` and `APP.bufferRehab` in `loadBootData()` (after `APP.todayPlan` is set).
+
+UI on buffer days: blue dashed lift card ("Optional"), no run card, rehab card uses the adjacent lift-only day's rehab (from `bufferRehab`). User can tap "Lift →" (calls `startWorkout()`, which marks `done=true` and clears `isBufferDay`) or "Skip — unlock today's run" (calls `skipBufferLift()`, which marks `done=true` and re-renders, revealing the run card from `todayPlan`). Skipping the lift has no effect on the cycle cursor, rest days, or cleanliness.
+
+All `rehabMatchExercise(APP.todayPlan.rehab_exercise)` calls use `activeRehabLabel()` instead; all `rehab_timing` references use `activeRehabTiming()`. This covers render intervals, `goRehab`, `rehabTimerSkip`, `rehabSkipRest`, `rehabWeightAdj`, `rehabLogSet`, and `rRehab`.
+
 ## Rehab exercise matching
 Behavior (`timed` / `weighted` / `free`) determined by substring-matching `rehab_exercise` text from `cycle_plan` against the `REHAB_EXERCISES` table via `rehabMatchExercise`. Rehab weights persist in `localStorage` per exercise key.
 
