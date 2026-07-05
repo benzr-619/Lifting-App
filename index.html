@@ -234,7 +234,10 @@ var APP = {
   rehabWeight:        0,    // loaded from localStorage per exercise
   rehabRestActive:    false,
   rehabRestEndTime:   null,
-  rehabRestRemaining: 120
+  rehabRestRemaining: 120,
+
+  // Structural test windows — loaded on boot, used in cycle evaluation and inline warnings
+  structuralWindows: []
 };
 
 // =============================================================
@@ -305,18 +308,20 @@ async function loadBootData() {
   APP.today = localDateStr();
   try {
     await signIn();
-    var [stateRes, configRes, logRes] = await Promise.all([
+    var [stateRes, configRes, logRes, windowsRes] = await Promise.all([
       db.from('plan_state').select('*').single(),
       db.from('plan_config').select('*').single(),
-      db.from('daily_log').select('*').eq('log_date', APP.today).maybeSingle()
+      db.from('daily_log').select('*').eq('log_date', APP.today).maybeSingle(),
+      db.from('structural_test_windows').select('*')
     ]);
 
     if (stateRes.error)  throw stateRes.error;
     if (configRes.error) throw configRes.error;
 
-    APP.planState  = stateRes.data;
-    APP.planConfig = configRes.data;
-    APP.todayLog   = logRes.data; // null = not checked in
+    APP.planState        = stateRes.data;
+    APP.planConfig       = configRes.data;
+    APP.todayLog         = logRes.data; // null = not checked in
+    APP.structuralWindows = windowsRes.data || [];
 
     // Seam buffer detection — runs BEFORE advance-pending to allow buffer-day interception.
     // Cursor stays at 8 through the buffer day; the 8→1 roll is deferred to the day after.
@@ -886,33 +891,46 @@ async function advanceCycleDay() {
   if (day < 8) {
     await updatePlanState({ current_cycle_day: day + 1 });
   } else {
-    // Rolling 8→1: evaluate the completed cycle
-    var clean = ps.current_cycle_clean &&
-                ps.current_cycle_rest_days <= pc.max_rest_days_per_cycle;
+    // Rolling 8→1: evaluate the completed cycle (three states: dirty / neutral / clean)
+    var baseClean = ps.current_cycle_clean &&
+                    ps.current_cycle_rest_days <= pc.max_rest_days_per_cycle;
 
     var patch = {
-      current_cycle_day:   1,
-      current_cycle_clean: true,
+      current_cycle_day:       1,
+      current_cycle_clean:     true,
       current_cycle_rest_days: 0
     };
 
-    if (clean) {
-      var newClean = ps.clean_cycles_completed + 1;
-      patch.clean_cycles_completed = newClean;
-      patch.phase_flare_count = 0;
-      // Phase advance check
-      if (newClean >= pc.clean_cycles_required && ps.current_phase < 7) {
-        var newPhase = ps.current_phase + 1;
-        patch.current_phase = newPhase;
-        patch.clean_cycles_completed = 0;
-        // Auto-raise deload run mile cap for phases where 2.0 mi is too aggressive
-        if (PHASE_DELOAD_RUN_CAP[newPhase]) {
-          await updatePlanConfig({ deload_run_mile_cap: PHASE_DELOAD_RUN_CAP[newPhase] });
+    if (!baseClean) {
+      // Dirty: flare occurred or rest budget blown — existing regression logic unchanged.
+      // (Phase regression itself was already applied by evaluateFlare; here we just reset.)
+      patch.clean_cycles_completed = 0;
+      patch.last_cycle_outcome = 'dirty';
+    } else {
+      // Dirty supersedes neutral: only check structural windows when no flare/budget breach.
+      var isNeutral = await checkStructuralWindows(ps.current_phase);
+      if (isNeutral) {
+        // Neutral: a required back-to-back block was missed.
+        // Do NOT increment clean_cycles_completed; do NOT touch phase_flare_count.
+        // Cycle simply repeats, giving another shot at a valid pass.
+        patch.last_cycle_outcome = 'neutral';
+      } else {
+        // Clean: no flare, within rest budget, all structural windows satisfied.
+        var newClean = ps.clean_cycles_completed + 1;
+        patch.clean_cycles_completed = newClean;
+        patch.phase_flare_count = 0;
+        patch.last_cycle_outcome = 'clean';
+        // Phase advance check
+        if (newClean >= pc.clean_cycles_required && ps.current_phase < 7) {
+          var newPhase = ps.current_phase + 1;
+          patch.current_phase = newPhase;
+          patch.clean_cycles_completed = 0;
+          // Auto-raise deload run mile cap for phases where 2.0 mi is too aggressive
+          if (PHASE_DELOAD_RUN_CAP[newPhase]) {
+            await updatePlanConfig({ deload_run_mile_cap: PHASE_DELOAD_RUN_CAP[newPhase] });
+          }
         }
       }
-    } else {
-      patch.clean_cycles_completed = 0;
-      // Stay in phase
     }
 
     await updatePlanState(patch);
@@ -922,7 +940,79 @@ async function advanceCycleDay() {
     var newDayNum = (newPhase - 1) * 8 + 1;
     var planRes = await db.from('cycle_plan').select('*').eq('day_number', newDayNum).single();
     if (!planRes.error) APP.todayPlan = planRes.data;
+
+    // Refresh windows in case phase changed
+    var winRes = await db.from('structural_test_windows').select('*');
+    APP.structuralWindows = winRes.data || [];
   }
+}
+
+// Returns true if the current cycle pass for the given phase failed at least one
+// structural test window (→ Neutral). Returns false when all windows are satisfied
+// or no windows are defined for this phase (→ Clean path proceeds normally).
+async function checkStructuralWindows(phase) {
+  var windows = [];
+  for (var wi = 0; wi < APP.structuralWindows.length; wi++) {
+    if (APP.structuralWindows[wi].phase === phase) windows.push(APP.structuralWindows[wi]);
+  }
+  if (!windows.length) return false;
+
+  // Scope to this cycle pass: find the most recent daily_log with plan_cycle_day=1
+  // for this phase — that is the calendar start of the current 8-day cycle.
+  var startRes = await db.from('daily_log')
+    .select('log_date')
+    .eq('plan_phase', phase)
+    .eq('plan_cycle_day', 1)
+    .order('log_date', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  var cycleStartDate = startRes.data ? startRes.data.log_date : '1970-01-01';
+
+  for (var i = 0; i < windows.length; i++) {
+    var w = windows[i];
+    // Fetch logs for this window's cycle_day range, from this cycle pass onwards
+    var logsRes = await db.from('daily_log')
+      .select('log_date, run_completed, plan_cycle_day')
+      .eq('plan_phase', phase)
+      .gte('plan_cycle_day', w.start_cycle_day)
+      .lte('plan_cycle_day', w.end_cycle_day)
+      .gte('log_date', cycleStartDate)
+      .order('log_date', { ascending: true });
+    var logs = logsRes.data || [];
+
+    var valid = true;
+
+    // Every cycle_day in [start, end] must have run_completed=true
+    for (var cd = w.start_cycle_day; cd <= w.end_cycle_day; cd++) {
+      var found = false;
+      for (var j = 0; j < logs.length; j++) {
+        if (logs[j].plan_cycle_day === cd && logs[j].run_completed) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) { valid = false; break; }
+    }
+
+    // No calendar gap > 1 day between consecutive run-completed entries
+    if (valid) {
+      var runLogs = [];
+      for (var r = 0; r < logs.length; r++) {
+        if (logs[r].run_completed) runLogs.push(logs[r]);
+      }
+      for (var k = 0; k < runLogs.length - 1; k++) {
+        var d1 = new Date(runLogs[k].log_date + 'T00:00:00');
+        var d2 = new Date(runLogs[k + 1].log_date + 'T00:00:00');
+        if (Math.round((d2 - d1) / 86400000) > 1) {
+          valid = false;
+          break;
+        }
+      }
+    }
+
+    if (!valid) return true; // at least one window unsatisfied → Neutral
+  }
+  return false; // all windows valid → not Neutral
 }
 
 // =============================================================
@@ -1272,6 +1362,28 @@ function rToday() {
     var runLogged = APP.todayLog && APP.todayLog.run_completed;
     html += actCard('ti-run', 'var(--color-bg-info)', 'var(--color-text-info)', 'Run', runLabel,
       tp.target_cadence ? tp.target_cadence + ' spm target' : null, 'toggleRun()', runLogged);
+    // Inline heads-up: warn when today falls inside a structural test window and run is skipped
+    if (!runLogged) {
+      var activeWin = null;
+      for (var swi = 0; swi < APP.structuralWindows.length; swi++) {
+        var sw = APP.structuralWindows[swi];
+        if (sw.phase === ps.current_phase
+            && ps.current_cycle_day >= sw.start_cycle_day
+            && ps.current_cycle_day <= sw.end_cycle_day) {
+          activeWin = sw;
+          break;
+        }
+      }
+      if (activeWin) {
+        html += '<div style="margin-top:-6px;margin-bottom:10px;padding:10px 14px;'
+          + 'background:var(--color-bg-warning);border:0.5px solid var(--color-text-warning);'
+          + 'border-radius:var(--radius-md);font-size:12px;color:var(--color-text-warning)">'
+          + '<i class="ti ti-alert-triangle" style="margin-right:5px"></i>'
+          + 'Skipping breaks the Day ' + activeWin.start_cycle_day + '→' + activeWin.end_cycle_day
+          + ' consecutive run test — cycle banks as neutral, not clean or flared.'
+          + '</div>';
+      }
+    }
   }
 
   // Lift card (if today is a lift day)
@@ -1409,6 +1521,18 @@ function rProgressSummary() {
   var phaseMax = isRehab ? 3 : 4;
   var phaseDisplay = (isRehab ? ps.current_phase : ps.current_phase - 3) + ' / ' + phaseMax;
 
+  var outcomeHtml = '';
+  if (ps.last_cycle_outcome === 'neutral') {
+    outcomeHtml = '<div style="margin-top:10px;padding:8px 12px;background:var(--color-bg-info);border:0.5px solid var(--color-text-info);border-radius:var(--radius-md);font-size:12px;color:var(--color-text-info)">'
+      + '<i class="ti ti-refresh" style="margin-right:4px"></i>Last cycle: Neutral — retest needed</div>';
+  } else if (ps.last_cycle_outcome === 'clean') {
+    outcomeHtml = '<div style="margin-top:10px;padding:8px 12px;background:var(--color-bg-success);border:0.5px solid var(--color-text-success);border-radius:var(--radius-md);font-size:12px;color:var(--color-text-success)">'
+      + '<i class="ti ti-circle-check" style="margin-right:4px"></i>Last cycle: Clean</div>';
+  } else if (ps.last_cycle_outcome === 'dirty') {
+    outcomeHtml = '<div style="margin-top:10px;padding:8px 12px;background:var(--color-bg-warning);border:0.5px solid var(--color-text-warning);border-radius:var(--radius-md);font-size:12px;color:var(--color-text-warning)">'
+      + '<i class="ti ti-alert-triangle" style="margin-right:4px"></i>Last cycle: Flared</div>';
+  }
+
   return '<div style="margin-top:20px;padding:16px;background:var(--color-bg-secondary);border-radius:var(--radius-lg)">'
     + '<p style="font-size:13px;font-weight:500;margin-bottom:12px">' + sectionLabel + '</p>'
     + '<div style="display:flex;gap:12px">'
@@ -1417,6 +1541,7 @@ function rProgressSummary() {
     + rStatBox('Cycle day', ps.current_cycle_day + ' / 8', '')
     + '</div>'
     + (phasePct > 0 ? '<div style="margin-top:12px"><div style="height:4px;background:var(--color-bg-tertiary);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + Math.min(phasePct, 100) + '%;background:var(--color-text-success);border-radius:2px"></div></div><p style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">' + phasePct + '% toward phase advance</p></div>' : '')
+    + outcomeHtml
     + '</div>';
 }
 

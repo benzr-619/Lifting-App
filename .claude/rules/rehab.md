@@ -58,9 +58,23 @@ Do not simplify these rules back to forced rest — the relative-rest model was 
 ## Phase ceiling
 - `plan_state.current_phase` CHECK constraint: `BETWEEN 1 AND 7` (migration 003).
 - `cycle_plan.day_number` CHECK constraint: `BETWEEN 1 AND 56` (migration 003).
+- `daily_log.plan_phase` CHECK constraint: `BETWEEN 1 AND 7` (migration 005b — was capped at 3, blocking phase 4+ log writes).
 - `v_phase_ready` uses `current_phase < 7` as the advance gate.
 - Phase advance logic in `index.html` (`advanceCycleDay`): `ps.current_phase < 7` — **do not change back to 3**.
 - Phases 4–7 semantics shift from ROM-gated rehab to training-load stages; clean-cycle advancement (2 consecutive clean cycles) applies identically.
+
+## Neutral cycle state (`checkStructuralWindows`)
+Three-state cycle evaluation: **dirty** (flare / rest budget blown) → existing regression logic; **neutral** (no flare, but a required back-to-back run block was missed) → `clean_cycles_completed` unchanged, no `phase_flare_count` change, no regression; **clean** (no flare, rest within budget, all structural windows satisfied) → existing increment behavior.
+
+Structural test windows live in `lift.structural_test_windows` (migration 005) — one row per back-to-back block per phase. New phases/blocks → add a row, no code change needed.
+
+`checkStructuralWindows(phase)` is called in `advanceCycleDay()` only when `baseClean` is true (dirty supersedes neutral). It scopes to the current cycle pass by finding the most recent `daily_log` row with `plan_cycle_day = 1` for the phase, then verifies each window's cycle_days all have `run_completed = true` AND no calendar gap > 1 day between consecutive run entries.
+
+`plan_state.last_cycle_outcome` ('clean' | 'neutral' | 'dirty') tracks the last completed cycle result and is displayed in `rProgressSummary`. Forward-looking only — historical `clean_cycles_completed` is not retroactively adjusted.
+
+Active seeded windows:
+- Phase 2, days 1→2: Day1(4.0mi)→Day2(2.0mi) back-to-back run test
+- Phase 5, days 1→3: Triple consecutive-day block (5.5→3.5→4.0mi)
 
 ## deload_run_mile_cap
 Read from `plan_config` at runtime. Automatically updated by `PHASE_DELOAD_RUN_CAP` in `index.html` when a phase advance fires:
