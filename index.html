@@ -614,6 +614,13 @@ var PHASE_DELOAD_RUN_CAP = { 6: 4.0, 7: 4.5 };
 // creating back-to-back runs at the seam. Derived from cycle_plan; static.
 var SEAM_BUFFER_OUTGOING_DAYS = {16: true, 40: true, 48: true, 56: true};
 
+// Preset alternate activities that can substitute for a scheduled run.
+// All entries set run_completed=true so cursor/gate logic is unaffected.
+// Add rows here to extend the list — no other code changes needed.
+var ALTERNATE_ACTIVITIES = [
+  { type: 'tennis', label: 'Tennis', icon: 'ti-ball-tennis' }
+];
+
 // Returns the rehab exercise label to use today.
 // On buffer days, substitutes the adjacent lift-only day's rehab for the run-day rehab.
 function activeRehabLabel() {
@@ -1360,10 +1367,27 @@ function rToday() {
     var runLabel = runMiles + ' miles';
     if (tp.run_notes) runLabel += ' — ' + tp.run_notes;
     var runLogged = APP.todayLog && APP.todayLog.run_completed;
-    html += actCard('ti-run', 'var(--color-bg-info)', 'var(--color-text-info)', 'Run', runLabel,
-      tp.target_cadence ? tp.target_cadence + ' spm target' : null, 'toggleRun()', runLogged);
-    // Inline heads-up: warn when today falls inside a structural test window and run is skipped
+    var actType = (APP.todayLog && APP.todayLog.activity_type) ? APP.todayLog.activity_type : 'run';
+    var runCardIcon = 'ti-run';
+    var runCardLabel = 'Run';
+    var runCardVal = runLabel;
+    var runCardSub = tp.target_cadence ? tp.target_cadence + ' spm target' : null;
+    if (runLogged && actType !== 'run') {
+      var altMatch = null;
+      for (var ali = 0; ali < ALTERNATE_ACTIVITIES.length; ali++) {
+        if (ALTERNATE_ACTIVITIES[ali].type === actType) { altMatch = ALTERNATE_ACTIVITIES[ali]; break; }
+      }
+      if (altMatch) {
+        runCardIcon = altMatch.icon;
+        runCardLabel = altMatch.label;
+        runCardVal = altMatch.label;
+        runCardSub = null;
+      }
+    }
+    html += actCard(runCardIcon, 'var(--color-bg-info)', 'var(--color-text-info)', runCardLabel, runCardVal,
+      runCardSub, 'toggleRun()', runLogged);
     if (!runLogged) {
+      // Inline heads-up: warn when today falls inside a structural test window and run is skipped
       var activeWin = null;
       for (var swi = 0; swi < APP.structuralWindows.length; swi++) {
         var sw = APP.structuralWindows[swi];
@@ -1383,10 +1407,14 @@ function rToday() {
           + ' consecutive run test — cycle banks as neutral, not clean or flared.'
           + '</div>';
       }
+      html += '<div style="text-align:right;margin-top:-6px;margin-bottom:10px">'
+        + '<button onclick="showActivityPicker()" style="border:none;background:transparent;'
+        + 'font-size:12px;color:var(--color-text-secondary);padding:4px 0;cursor:pointer">'
+        + 'Log something else instead →</button></div>';
     }
   }
 
-  // Lift card (if today is a lift day)
+  // Lift card
   if (tp.is_lift_day || APP.isBufferDay) {
     if (APP.isBufferDay) {
       html += rBufferDayCard();
@@ -1396,6 +1424,9 @@ function rToday() {
         .map(function(e) { return e.name; });
       html += rLiftCard(ps.current_gym_day, liftNames);
     }
+  } else {
+    // Ad-hoc lift: not scheduled, but always available
+    html += rAdHocLiftCard();
   }
 
   // Rehab after run/lift if timing is after
@@ -1510,6 +1541,31 @@ function rBufferDayCard() {
     + actionBtn + '</div>';
   html += '</div>';
   return html;
+}
+
+function rAdHocLiftCard() {
+  var done       = APP.liftCompletedToday;
+  var inProgress = !done && APP.sessionId !== null;
+  var opa = done ? ';opacity:0.65' : '';
+  var actionBtn;
+  if (done) {
+    actionBtn = '<div style="width:36px;height:36px;border-radius:50%;background:var(--color-text);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-check" style="font-size:18px;color:var(--color-bg)"></i></div>';
+  } else if (inProgress) {
+    actionBtn = '<span style="font-size:12px;font-weight:500;color:var(--color-text-warning);flex-shrink:0">Resume →</span>';
+  } else {
+    actionBtn = '<span style="font-size:13px;font-weight:500;color:var(--color-text-info);flex-shrink:0">Lift now →</span>';
+  }
+  return '<div style="background:var(--color-bg);border:0.5px dashed var(--color-text-info);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;cursor:pointer' + opa + '" onclick="' + (done ? '' : 'startWorkout()') + '">'
+    + '<div style="display:flex;align-items:center;gap:12px">'
+    + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-info);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+    + '<i class="ti ti-barbell" style="font-size:20px;color:var(--color-text-info)"></i></div>'
+    + '<div style="flex:1">'
+    + '<p style="font-size:12px;color:var(--color-text-info);margin-bottom:2px">Lift · Optional</p>'
+    + '<p style="font-size:16px;font-weight:500">Day ' + APP.planState.current_gym_day + ' workout</p>'
+    + (!done ? '<p style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">Not on your schedule — lift freely or skip</p>' : '')
+    + '</div>'
+    + actionBtn + '</div>'
+    + '</div>';
 }
 
 function rProgressSummary() {
@@ -1868,7 +1924,21 @@ function rCalDayDetail(dateStr, log, sessions) {
            : log.knee_pain_level === 3 ? 'var(--color-text-warning)' : 'var(--color-text-success)';
     html += rCalDetailRow('ti-clipboard-check', pc,
       'Pain ' + log.knee_pain_level + '/5' + (log.joint_fullness ? ' · Swelling' : ''));
-    if (log.run_completed)   html += rCalDetailRow('ti-run',      'var(--color-text-info)',    'Run completed');
+    if (log.run_completed) {
+      var calActType = log.activity_type || 'run';
+      var calActLabel = 'Run completed';
+      var calActIcon = 'ti-run';
+      if (calActType !== 'run') {
+        for (var cai = 0; cai < ALTERNATE_ACTIVITIES.length; cai++) {
+          if (ALTERNATE_ACTIVITIES[cai].type === calActType) {
+            calActLabel = ALTERNATE_ACTIVITIES[cai].label + ' completed';
+            calActIcon = ALTERNATE_ACTIVITIES[cai].icon;
+            break;
+          }
+        }
+      }
+      html += rCalDetailRow(calActIcon, 'var(--color-text-info)', calActLabel);
+    }
     if (log.rehab_completed) html += rCalDetailRow('ti-activity', 'var(--color-text-warning)', 'Rehab completed');
     if (log.plan_phase) {
       html += '<p style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">Phase ' + log.plan_phase + ' · Cycle day ' + log.plan_cycle_day + '</p>';
@@ -2969,11 +3039,50 @@ function maybeWriteNonLiftAdvance() {
 async function toggleRun() {
   if (!APP.todayLog) { goCheckin(); return; }
   var newVal = !APP.todayLog.run_completed;
+  var patch = { run_completed: newVal };
+  if (newVal) patch.activity_type = 'run';
   var { error } = await db.from('daily_log')
-    .update({ run_completed: newVal })
+    .update(patch)
     .eq('log_date', APP.today);
   if (!error) {
     APP.todayLog.run_completed = newVal;
+    if (newVal) APP.todayLog.activity_type = 'run';
+    maybeWriteNonLiftAdvance();
+  }
+  render();
+}
+
+function showActivityPicker() {
+  if (!APP.todayLog) { goCheckin(); return; }
+  var overlay = document.createElement('div');
+  overlay.id = 'activity-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  var btns = ALTERNATE_ACTIVITIES.map(function(a) {
+    return '<button onclick="closeActivityPicker();logAlternateActivity(\'' + a.type + '\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center">'
+      + '<i class="ti ' + a.icon + '" style="color:var(--color-text-info)"></i>' + a.label + '</button>';
+  }).join('');
+  overlay.innerHTML = '<div style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px">'
+    + '<p style="font-size:16px;font-weight:500;margin-bottom:16px">Log instead of running</p>'
+    + btns
+    + '<button onclick="closeActivityPicker()" style="width:100%;padding:14px;border:none;background:transparent;font-size:14px;color:var(--color-text-secondary)">Cancel</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeActivityPicker(); });
+}
+
+function closeActivityPicker() {
+  var el = document.getElementById('activity-overlay');
+  if (el) el.remove();
+}
+
+async function logAlternateActivity(type) {
+  if (!APP.todayLog) { goCheckin(); return; }
+  var { error } = await db.from('daily_log')
+    .update({ run_completed: true, activity_type: type })
+    .eq('log_date', APP.today);
+  if (!error) {
+    APP.todayLog.run_completed = true;
+    APP.todayLog.activity_type = type;
     maybeWriteNonLiftAdvance();
   }
   render();

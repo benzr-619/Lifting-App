@@ -80,6 +80,16 @@ All `rehabMatchExercise(APP.todayPlan.rehab_exercise)` calls use `activeRehabLab
 ## Rehab exercise matching
 Behavior (`timed` / `weighted` / `free`) determined by substring-matching `rehab_exercise` text from `cycle_plan` against the `REHAB_EXERCISES` table via `rehabMatchExercise`. Rehab weights persist in `localStorage` per exercise key.
 
+## Ad-hoc lift card (`rAdHocLiftCard`)
+On non-lift, non-buffer days, `rToday()` always renders `rAdHocLiftCard()` — a dashed/optional card identical in structure to `rBufferDayCard()`. Tapping it calls `startWorkout()` unchanged; `finishSession()` writes `lift_advance_pending` as normal. The card is always shown (even when done, dimmed). No readiness/deload gate — always available.
+
+## Alternate activity logging (`ALTERNATE_ACTIVITIES`, `showActivityPicker`, `logAlternateActivity`)
+`ALTERNATE_ACTIVITIES` is a module-level array of `{type, label, icon}`. Currently: `[{type:'tennis', label:'Tennis', icon:'ti-ball-tennis'}]`. Add rows here to extend — no other code changes needed.
+
+When a run day is not yet logged, a "Log something else instead →" text button appears below the run card. Tapping it opens a bottom-sheet overlay (`activity-overlay`) listing the preset alternatives. Selecting one calls `logAlternateActivity(type)`, which sets `run_completed = true` AND `activity_type = type` — so all cursor/gate/exemption logic (which only checks `run_completed`) is unaffected. `toggleRun()` also sets `activity_type = 'run'` when toggling on.
+
+`daily_log.activity_type TEXT DEFAULT 'run'` was added in migration 006. The run card and calendar detail view both reflect the alternate activity label/icon when `activity_type !== 'run'`.
+
 ## Calendar data layer gotchas
 - `lift.sessions` has **`started_at`** (not `created_at`) and `completed_at`. Selecting `created_at` causes a silent 400 from Supabase and returns `[]`.
 - Do **not** chain `.not('completed_at', 'is', null)` with `.gte`/`.lte` on the same column — PostgREST returns 400. The range filters already exclude NULLs.
