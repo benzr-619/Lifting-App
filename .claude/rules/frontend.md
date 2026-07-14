@@ -11,11 +11,23 @@ metadata:
 Manual override sheet for fixing mis-recorded days without touching Supabase by hand. **Opened by long-pressing the `Phase · Day` badge** (`id="phase-badge"` in `rToday`) — `badgePressStart`/`badgePressEnd` arm a 600ms `BADGE_PRESS_TIMER` via inline `ontouchstart`/`onmousedown` string handlers (cancel on touchmove/mouseleave). Uses the same bottom-sheet overlay idiom as `showSkipMenu` (`id="state-overlay"`, backdrop-click dismiss).
 - **Module globals:** `STATE_DRAFT` (working copy of the cursor while editing), `STATE_SESSIONS` (recent sessions loaded for the list). Both cleared by `closeStatePanel()`.
 - **Cursor editor:** ± steppers (`stateAdj` clamps) for `current_phase` (1–7), `current_cycle_day` (1–8), `current_gym_day` (1–3). `saveStateCursor()` → `updatePlanState(...)` then `loadBootData()` for a full refresh. Save button disabled until the draft differs from `APP.planState`.
-- **Lift toggle:** `stateMarkLiftDone` / `stateMarkLiftNotDone` flip `APP.liftCompletedToday` and write/clear `lift_advance_pending` (done-write mirrors `finishSession`: `nextGymDay = (current_gym_day % 3) + 1`).
+- **Lift toggle:** `stateMarkLiftDone` / `stateMarkLiftNotDone` flip `APP.liftCompletedToday` and write/clear `lift_gym_day_pending` (done-write mirrors `finishSession`: `nextGymDay = (current_gym_day % 3) + 1`).
 - **Recent sessions:** last 5 via `db.from('sessions')`. Re-date uses `<input type="date">` → `stateRedateSession` preserves time-of-day (only sub-second µs drop) so the stored instant's local day moves cleanly; both `started_at` and `completed_at` are patched. Delete → `db.delete` (relies on `session_sets.session_id_fkey ON DELETE CASCADE`). `refreshStateSheet()` re-renders only the sheet body in place. `localDateFromTs(ts)` mirrors `localDateStr` for a timestamp.
 
-## Deferred day-advance stale guard (`loadBootData`)
-When `lift_advance_pending.date === APP.today`, the advance is only treated as "still pending → show done" if `pending.nextGymDay !== current_gym_day`. If they're equal, the advance was already applied (e.g. via the state panel or a direct DB edit), so the entry is stale and discarded instead of re-marking the lift done. (Without this, a same-day cursor fix left the lift stuck as "done".)
+## Deferred day-advance — two independent pending objects
+`lift_advance_pending` (old combined key) has been replaced by two separate localStorage entries:
+
+**`lift_gym_day_pending`: `{ date, nextGymDay }`**
+Written by `finishSession`, `stateMarkLiftDone`, and the DB-fallback block.
+- Same-day stale guard: discard if `nextGymDay === current_gym_day` (manually advanced via state panel).
+- Next-day: apply `updatePlanState({ current_gym_day: nextGymDay })` then delete.
+
+**`lift_cycle_day_pending`: `{ date }`**
+Written by `maybeWriteCycleDayAdvance` (called from `toggleRun`, `logAlternateActivity`, `toggleRehab`, `rehabMarkComplete` — all day types).
+- Same-day: no-op — just keep it.
+- Next-day: call `advanceCycleDay()` then delete. Buffer-day suppression applies here (seaBufElapsed === 1 → delete without advancing).
+
+The two objects apply independently. The cycle cursor can advance without the gym-day cursor moving, and vice versa. `APP.liftCompletedToday` is set only by the gym-day pending (lift actually happened), not by the cycle-day pending.
 
 ## State & render model
 - One global `var APP = {…}`. Mutate it, then call `render()`.
@@ -66,12 +78,12 @@ ES5-flavored throughout: `var`, `function`, `.map/.forEach`, string concatenatio
 At cycle 8→1 boundary crossings where the outgoing day AND incoming day 1 both have `run_miles` (seam days: day_numbers 16, 40, 48, 56 = `SEAM_BUFFER_OUTGOING_DAYS`), a standalone buffer day is inserted between them. `current_cycle_day` stays at **8** through the buffer day — the 8→1 roll is deferred to the calendar day after.
 
 **Detection** (`loadBootData`, runs before advance-pending processing): if `current_cycle_day === 8` and today's phase is a seam boundary phase, query `daily_log` for the most recent row with `plan_phase = current_phase, plan_cycle_day = 8, run_completed = true, rehab_completed = true`. Compute `seaBufElapsed` = days between that anchor and today.
-- `seaBufElapsed === 1` → today is the buffer day: set `APP.isBufferDay = true`, suppress `lift_advance_pending` (delete it), query adjacent rehab.
-- `seaBufElapsed >= 2` → buffer day has passed: apply deferred 8→1 roll via `advanceCycleDay()` if no pending was already applied.
+- `seaBufElapsed === 1` → today is the buffer day: set `APP.isBufferDay = true`, suppress `lift_cycle_day_pending` (delete it without advancing), query adjacent rehab.
+- `seaBufElapsed >= 2` → buffer day has passed: apply deferred 8→1 roll via `advanceCycleDay()` if no cycle advance was already applied. `lift_gym_day_pending` is unaffected by buffer-day logic.
 
 **Buffer day state**: `APP.isBufferDay = true`, `APP.bufferRehab` = nearest preceding lift-only (is_lift_day=true, run_miles IS NULL) day's rehab, queried via `.lte('day_number', outgoingDayNum)`. No localStorage used — state is fully DB-derived on every boot.
 
-**UI on buffer days**: blue dashed lift card ("Optional"), **no run card**, rehab card uses `bufferRehab` via `activeRehabLabel()`/`activeRehabTiming()`. Tapping "Lift →" calls `startWorkout()` as normal — `finishSession()` writes a `lift_advance_pending` for the gym_day advance, which is applied the next morning alongside `advanceCycleDay()`. Skipping (doing nothing) has zero effect on cycle cursor, rest days, or cleanliness — the deferred roll fires at next boot when `seaBufElapsed >= 2`.
+**UI on buffer days**: blue dashed lift card ("Optional"), **no run card**, rehab card uses `bufferRehab` via `activeRehabLabel()`/`activeRehabTiming()`. Tapping "Lift →" calls `startWorkout()` as normal — `finishSession()` writes `lift_gym_day_pending` for the gym_day advance; `maybeWriteCycleDayAdvance()` returns early (buffer-day guard) so no `lift_cycle_day_pending` is written. Skipping (doing nothing) has zero effect on cycle cursor, rest days, or cleanliness — the deferred 8→1 roll fires via `seaBufElapsed >= 2` at next boot.
 
 Exercise loading and lift card rendering both guard on `APP.todayPlan.is_lift_day || APP.isBufferDay` since the cursor day (e.g., day 16) has `is_lift_day = false`.
 
@@ -81,14 +93,25 @@ All `rehabMatchExercise(APP.todayPlan.rehab_exercise)` calls use `activeRehabLab
 Behavior (`timed` / `weighted` / `free`) determined by substring-matching `rehab_exercise` text from `cycle_plan` against the `REHAB_EXERCISES` table via `rehabMatchExercise`. Rehab weights persist in `localStorage` per exercise key.
 
 ## Ad-hoc lift card (`rAdHocLiftCard`)
-On non-lift, non-buffer days, `rToday()` always renders `rAdHocLiftCard()` — a dashed/optional card identical in structure to `rBufferDayCard()`. Tapping it calls `startWorkout()` unchanged; `finishSession()` writes `lift_advance_pending` as normal. The card is always shown (even when done, dimmed). No readiness/deload gate — always available.
+On non-lift, non-buffer days, `rToday()` always renders `rAdHocLiftCard()` — a dashed/optional card identical in structure to `rBufferDayCard()`. Tapping it calls `startWorkout()` unchanged; `finishSession()` writes `lift_gym_day_pending` as normal. The card is always shown (even when done, dimmed). No readiness/deload gate — always available.
 
 ## Alternate activity logging (`ALTERNATE_ACTIVITIES`, `showActivityPicker`, `logAlternateActivity`)
-`ALTERNATE_ACTIVITIES` is a module-level array of `{type, label, icon}`. Currently: `[{type:'tennis', label:'Tennis', icon:'ti-ball-tennis'}]`. Add rows here to extend — no other code changes needed.
+`ALTERNATE_ACTIVITIES` is a module-level array of `{type, label, icon}`. Currently: `[{type:'tennis', label:'Tennis', icon:'ti-ball-tennis'}]`. Add rows here to extend — no other code changes needed for either mechanism below.
 
 When a run day is not yet logged, a "Log something else instead →" text button appears below the run card. Tapping it opens a bottom-sheet overlay (`activity-overlay`) listing the preset alternatives. Selecting one calls `logAlternateActivity(type)`, which sets `run_completed = true` AND `activity_type = type` — so all cursor/gate/exemption logic (which only checks `run_completed`) is unaffected. `toggleRun()` also sets `activity_type = 'run'` when toggling on.
 
 `daily_log.activity_type TEXT DEFAULT 'run'` was added in migration 006. The run card and calendar detail view both reflect the alternate activity label/icon when `activity_type !== 'run'`.
+
+## Cross-training log (`showCrossTrainingPicker`, `logCrossTraining`, `rCrossTrainingCard`)
+**Distinct from** `logAlternateActivity` — used on days with **no scheduled run** (`APP.todayPlan.run_miles === null`). Sets `daily_log.cross_training_completed = true` and `activity_type = type`; does **not** touch `run_completed` (stays false). No effect on cursor, flare logic, or structural test windows.
+
+`rCrossTrainingCard()` is always rendered in `rToday()` when `!tp.run_miles && !APP.isBufferDay` — same always-visible/dimmed-when-done pattern as `rAdHocLiftCard`. Reuses the same `activity-overlay` bottom-sheet and `ALTERNATE_ACTIVITIES` list, but routes to `logCrossTraining` instead of `logAlternateActivity`.
+
+`logCrossTraining(type)` upserts into `daily_log` (same `onConflict: 'user_id,log_date'` as `saveDailyLog`), then refreshes `APP.todayLog = data` and calls `render()`. Does not call `maybeWriteCycleDayAdvance()` — cross-training does not satisfy the run/rehab completion gate.
+
+`recomputeCycleRestDays()` treats `cross_training_completed = true` as an active day — a day with cross-training does not count as a rest day even if `run_completed` and `rehab_completed` are both false.
+
+Next-day heads-up: `APP.crossTrainingHeadsUp` (bool, set in `loadBootData` by querying yesterday's log) → when true and today has `run_miles`, `rToday()` renders an info banner above the run card ("consider easing today's run"). Purely advisory — no plan_state mutations.
 
 ## Calendar data layer gotchas
 - `lift.sessions` has **`started_at`** (not `created_at`) and `completed_at`. Selecting `created_at` causes a silent 400 from Supabase and returns `[]`.

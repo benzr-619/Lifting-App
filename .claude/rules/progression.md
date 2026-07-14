@@ -19,6 +19,7 @@ Classic threshold: set3 must reach **25 lbs** before auto-progression kicks in.
 - `'weight'` → classic/rep-ladder logic (all exercises by default)
 - `'stance'` → `runStanceProgression` (Plank with shoulder taps); stance codes stored in set1/2/3_weight: `1` = shoulder width, `2` = feet together
 - Bodyweight exercises (`is_bodyweight = true`) exit `runProgressionEngine` early — no progression regardless of type. Ab roller is the example.
+- ROM hold: if `ex.progression_hold_until_phase` is set AND `APP.planState.rom_stage < ex.progression_hold_until_phase`, the engine returns early. This gate keys off `rom_stage` (not `current_phase`) — front squats and single-leg bench squat require `rom_stage = 3` (full ROM). A phase advance does not unlock this.
 
 ## Finishers
 Optional exercises (`is_optional = true`) **do** run through the full progression engine — the old `is_optional` guard was removed. Only ab roller is exempt (bodyweight). Lateral lunge = classic. Y raise = rep-ladder (5 lbs currently).
@@ -41,7 +42,7 @@ Rep floor = `ceil(goal·0.8)`; ceiling = `goal+5`.
 - **Stall:** 2 consecutive sessions under floor → deload set3 by 10% (round to 5), re-enter catch-up.
 - **Increments:** 5 lb only.
 - Skipped sets and bodyweight exercises never advance progression or count as stalls.
-- Progression frozen entirely while `in_deload` when `deload_freezes_progression` is true (read from `plan_config`).
+- Progression frozen for **knee-loading exercises only** while `in_deload` when `deload_freezes_progression` is true (read from `plan_config`). Non-knee-loading exercises (bench, rows, curls, etc.) progress normally during a deload — a knee flare has no clinical basis to freeze upper body work. `runStanceProgression` has no deload freeze at all (Plank is not knee-loading).
 - `progression_hold_until_phase` (front squats, single-leg bench squat = 3): all advances suppressed while `current_phase` < that value.
 
 ## Stance progression (`runStanceProgression`)
@@ -61,6 +62,25 @@ Weight (and stance) advances only when user taps "Confirm progression" on set 3 
 `isKneeLoading(ex)` substring-matches `ex.name` (lowercased) against: `['front squat', 'single-leg bench squat', 'romanian deadlift', 'push press']`.
 
 When amber + knee-loading + user hit goal + confirmed: early `return` with **no DB write**. Stall counting still runs. Stance and non-knee-loading exercises are unaffected.
+
+## Detraining deload (`checkDetrain`)
+Called once per fresh session start (not for resumed sessions). Checks calendar days elapsed since each weighted exercise's most recent completed set, using the last 10 completed sessions for the current gym_day as the history window.
+
+**Trigger:** elapsed > 14 days.
+
+**Math:** same as stall deload — `set3 = round(set3 × 0.9 / 5) × 5`, recompute set2/set1 targets via `classicTargets`, enter `catch_up_set2`. `consecutive_failures` reset to 0 (layoff ≠ rep-floor failure; distinguish the cause if needed later).
+
+**Exclusions:**
+- Bodyweight exercises (`is_bodyweight = true`)
+- Stance exercises (`progression_type = 'stance'`)
+- Any knee-loading exercise already under `in_deload + deload_freezes_progression = true`
+- Exercises with no completed sets on record (new exercise — no deload)
+
+**Display:** deload reason is stored in `APP.detrainingNotes[exercise_id]` and shown as:
+- A warning line in `rExerciseRow` (workout overview) when the exercise is active
+- An amber banner in `rLogSet` on set 1 only
+
+**No skip-counter:** under the opportunistic-lift model, missing a lift is an absence, not a discrete event — a counter would never reliably increment.
 
 ## Exercise-level skipping
 `skipWholeExercise(idx, reason)` logs all 3 sets as skipped and calls `finishExercise`.

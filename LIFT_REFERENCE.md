@@ -99,6 +99,8 @@ One row. The live position in the rehab plan.
 | `phase_flare_count` | Flares in this phase since the last clean cycle |
 | `in_deload` | True during relative rest after a flare |
 | `deload_started_on` | Date; enforces minimum deload duration |
+| `rom_stage` | 1–3 — current squat ROM depth stage (1=45°, 2=60°, 3=Full). Independent of `current_phase`; advances only when `rom_stage_min_days` elapses without a flare. |
+| `rom_stage_started_on` | Date when the current ROM stage started. Reset to today on any confirmed flare or niggle-skip (regardless of phase). |
 
 ---
 
@@ -114,8 +116,9 @@ Never hard-code these values in logic — always read from this table.
 | `flares_before_regress` | 2 | Flares before phase regression |
 | `flare_min_rest_days` | 2 | Minimum days in deload before exit allowed |
 | `deload_run_mile_cap` | 2.0 | Max run distance while deloaded. **Auto-updated on phase advance:** Phase 6 → 4.0 mi, Phase 7 → 4.5 mi. Manually raise in `plan_config` before entering Phase 6 if auto-update hasn't fired. |
-| `deload_freezes_progression` | true | Freeze lift weights during deload |
+| `deload_freezes_progression` | true | Freeze lift weights during deload — **knee-loading exercises only** (bench, rows, curls are unaffected) |
 | `deload_suppress_plyo` | true | Replace plyometrics with isometrics during deload |
+| `rom_stage_min_days` | 28 | Minimum days per ROM stage before auto-advance to next (4–6 week evidence base) |
 
 ---
 
@@ -213,7 +216,7 @@ Phases 1–3 are ROM-gated acute rehab stages. Phases 4–7 shift to training-lo
 
 | Exercise | Set 1 | Set 2 | Set 3 | Goal Reps | State | Notes |
 |---|---|---|---|---|---|---|
-| Single-leg bench squat | 20 | 25 | 30 | 10 | catch_up_set2 | **HOLD until Phase 3** (partial ROM) |
+| Single-leg bench squat | 20 | 25 | 30 | 10 | catch_up_set2 | **HOLD until ROM Stage 3** (full ROM required) |
 | DB push press | 45 | 50 | 55 | 8 | ready | Knee-loading: amber-suppressed |
 | Lateral raise | 10 | 10 | 15 | 15 | ready | Superset with Curl |
 | Curl | 10 | 10 | 15 | 13 | ready | Superset with Lateral raise |
@@ -224,15 +227,15 @@ Phases 1–3 are ROM-gated acute rehab stages. Phases 4–7 shift to training-lo
 
 | Exercise | Set 1 | Set 2 | Set 3 | Goal Reps | State | Notes |
 |---|---|---|---|---|---|---|
-| Front squats | 55 | 65 | 70 | 10 | catch_up_set1 | **HOLD until Phase 3** (partial ROM) |
+| Front squats | 55 | 65 | 70 | 10 | catch_up_set1 | **HOLD until ROM Stage 3** (full ROM required) |
 | Bent-over rows | 40 | 45 | 45 | 10 | catch_up_set1 | — |
 | Glute bridge | 65 | 70 | 75 | 15 | catch_up_set2 | — |
 | Tricep extension | 40 | 45 | 45 | 15 | catch_up_set1 | — |
 | Ab roller *(optional)* | BW | BW | BW | 10 | ready | — |
 
 ### Contraindicated / Modified Exercises
-- **Front squats** — performed at partial ROM (45° phase 1, 60° phase 2). Weight progression locked until Phase 3 regardless of rep performance. Full progression resumes from Phase 3 onward.
-- **Single-leg bench squat** — same hold until Phase 3.
+- **Front squats** — performed at partial ROM (45° at ROM stage 1, 60° at stage 2). Weight progression locked until `rom_stage = 3` (full ROM) regardless of rep performance or current phase. The ROM gate is independent of `current_phase` — a phase advance does not unlock progression if the ROM clock hasn't completed its minimum window.
+- **Single-leg bench squat** — same ROM stage 3 hold.
 - **Plyometrics** — not prescribed until Phase 3. If `in_deload = true`, plyos are suppressed regardless of phase (replaced by isometric pre-load).
 - **Isometric knee pre-load** — primary prescription in Phases 1–3 only. From Phase 4 onward it's conditional: only reappears during a deload response if symptoms return.
 
@@ -267,8 +270,8 @@ ready → catch_up_set2 → catch_up_set1 → ready → ...
 The engine computes the next weight and displays it, but nothing is written to the DB until the user taps "Confirm progression" on set 3. Stall counting and deload regressions are automatic.
 
 ### Gates That Block Progression
-1. `in_deload = true` AND `deload_freezes_progression = true` → all advances frozen
-2. `progression_hold_until_phase` on the exercise AND `current_phase < that value` → advance suppressed
+1. `in_deload = true` AND `deload_freezes_progression = true` AND exercise is knee-loading → advance frozen (bench, rows, curls unaffected)
+2. `progression_hold_until_phase` on the exercise AND `rom_stage < that value` → advance suppressed (gate now keys off ROM stage, not current_phase)
 3. Readiness = amber AND exercise is knee-loading AND goal reps hit → early return, no DB write (not a stall either)
 4. Skipped sets and bodyweight/optional exercises → never advance or count as stalls
 

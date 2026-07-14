@@ -7,11 +7,52 @@ metadata:
 
 # Rehab & Flare Engine
 
-## Non-lift day advance (`maybeWriteNonLiftAdvance`)
-Non-lift days (is_lift_day = false) never call `finishSession`, so they need their own path to write `lift_advance_pending`. `maybeWriteNonLiftAdvance()` is called from `toggleRun`, `toggleRehab`, and `rehabMarkComplete` — it fires once both `run_completed` and `rehab_completed` are true. On non-lift days, `nextGymDay` = `current_gym_day` (unchanged); only `current_cycle_day` advances.
+## ROM stage cursor (`rom_stage`, `rom_stage_started_on`)
+Independent of `current_phase`. Advances on time elapsed, not on phase transitions. Three stages: 1=45°, 2=60°, 3=Full ROM.
+
+**Advance logic** (`maybeAdvanceRomStage`, called each boot after `recomputeCycleRestDays`):
+- If `today − rom_stage_started_on ≥ rom_stage_min_days` (28 days, from `plan_config`) AND `rom_stage < 3`: increment `rom_stage`, reset `rom_stage_started_on = today`.
+- Phase advance does NOT trigger ROM stage advance — they are fully independent. A phase can advance while ROM stage stays at 1 (if the flare clock keeps resetting it), or ROM stage can reach 3 while still in Phase 1.
+
+**Flare resets the ROM clock** (`applyFlareConsequences`):
+- Any confirmed flare (pain ≥ `pain_dirty_threshold`, swelling, or `run_outcome = 'flagged'`) resets `rom_stage_started_on = today` when `rom_stage < 3`.
+- The stage number does NOT regress — only the clock resets, requiring another 28-day clean window before advancing.
+
+**Niggle-skip resets the clock** (`markNiggleFlare`):
+- When `markNiggleFlare` is called (meaning the isRunAndLiftDay+isKneeLoading exemption did NOT apply), also resets `rom_stage_started_on = today` if `rom_stage < 3`.
+- Same exemption applies: run+lift-day knee-loading skips → `markNiggleFlare` is not called → no ROM reset.
+
+**UI**: `rProgressSummary` displays ROM stage and days remaining. `rExerciseRow` and `rLogSet` show a lock indicator for exercises held by the ROM gate.
+
+## Flagged-run flare (fully implemented)
+`run_outcome = 'flagged'` now triggers immediate flare consequences — no wait for next morning's check-in.
+
+After logging a run (`toggleRun` or `logAlternateActivity`), a bottom sheet asks "How did that run feel?" with Clean / Flagged options. Selecting "Flagged" calls `saveRunOutcome('flagged')`, which:
+1. Writes `run_outcome = 'flagged'` to `daily_log`.
+2. Calls `applyFlareConsequences()` directly (same logic as morning check-in flare path).
+3. Calls `refreshReadiness()` to update `APP.readiness`.
+
+Un-logging a run (`toggleRun` setting `run_completed = false`) also clears `run_outcome = null`.
+
+The view `v_readiness` treats `run_outcome = 'flagged'` as red (was in the view schema already; now there is UI to set it).
+
+## Cycle-day advance (`maybeWriteCycleDayAdvance`)
+The cycle cursor is **fully decoupled from lift completion**. `maybeWriteCycleDayAdvance()` fires on every day type (lift or non-lift) once the rehab+run gate is satisfied. It is called from `toggleRun`, `logAlternateActivity`, `toggleRehab`, and `rehabMarkComplete`.
+
+Gate logic:
+- `rehab_completed` must be true.
+- If today has a scheduled run (`APP.todayPlan.run_miles !== null`): `run_completed` must also be true.
+- Buffer days return early — their 8→1 roll is managed by seam-buffer detection in `loadBootData`.
+
+On completion the function writes `lift_cycle_day_pending: { date }` to localStorage. `loadBootData` applies it the next morning via `advanceCycleDay()`, independent of whatever `lift_gym_day_pending` does.
+
+Rationale: the rehab evidence base treats running progression and strength work as two independently-dosed tracks. Missing a lift (e.g. a 12-hour shift) should not stall the prescribed run program — the cycle advances when run+rehab are done, regardless.
+
+## Gym-day advance (`finishSession` / `lift_gym_day_pending`)
+`current_gym_day` only advances when a lift session is actually completed. `finishSession()` writes `lift_gym_day_pending: { date, nextGymDay }`. Applied independently next morning — can lag behind the cycle cursor by any number of days. You never "lose" gym day 2; it simply waits until you lift again.
 
 ## Rehab cursor (`advanceCycleDay`)
-Advances **one cycle-day per completed session**, NOT by calendar.
+Advances **one cycle-day per completed rehab+run session** (per-calendar-day, not per-lift). NOT gated on lift completion.
 Plan lookup: `day_number = (current_phase - 1) * 8 + current_cycle_day`
 
 On the 8→1 roll, evaluate the cycle:
@@ -62,6 +103,15 @@ Do not simplify these rules back to forced rest — the relative-rest model was 
 - `v_phase_ready` uses `current_phase < 7` as the advance gate.
 - Phase advance logic in `index.html` (`advanceCycleDay`): `ps.current_phase < 7` — **do not change back to 3**.
 - Phases 4–7 semantics shift from ROM-gated rehab to training-load stages; clean-cycle advancement (2 consecutive clean cycles) applies identically.
+
+## Rest-day recompute (`recomputeCycleRestDays`)
+Called at the top of `loadBootData()` after initial data load, before any `advanceCycleDay()` call. Recomputes `plan_state.current_cycle_rest_days` from source of truth on every boot — the field was previously always 0 because only resets (never increments) existed.
+
+A calendar day is **active** (not a rest day) if any of these are true for that date: `run_completed = true`, `rehab_completed = true`, `cross_training_completed = true`, or a completed `sessions` row exists. Every other calendar day between cycle start and yesterday counts as a rest day.
+
+Cycle start anchor: most recent `daily_log` row with `plan_phase = current_phase AND plan_cycle_day = 1` — same anchor as `checkStructuralWindows`. If no such row exists, returns early without writing. If the cycle started today, writes 0 and returns.
+
+`advanceCycleDay()` resets `current_cycle_rest_days` to 0 on the 8→1 roll (correct — new cycle starts). The recompute runs before the advance so mid-cycle counts are accurate on every boot.
 
 ## Neutral cycle state (`checkStructuralWindows`)
 Three-state cycle evaluation: **dirty** (flare / rest budget blown) → existing regression logic; **neutral** (no flare, but a required back-to-back run block was missed) → `clean_cycles_completed` unchanged, no `phase_flare_count` change, no regression; **clean** (no flare, rest within budget, all structural windows satisfied) → existing increment behavior.

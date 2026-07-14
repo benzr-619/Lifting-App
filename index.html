@@ -237,7 +237,15 @@ var APP = {
   rehabRestRemaining: 120,
 
   // Structural test windows — loaded on boot, used in cycle evaluation and inline warnings
-  structuralWindows: []
+  structuralWindows: [],
+
+  // True when today has a scheduled run and yesterday had cross_training_completed=true.
+  // Advisory only — does not affect plan_state or flare logic.
+  crossTrainingHeadsUp: false,
+
+  // exercise_id → message string for exercises where a detraining deload was applied at
+  // session start (>14 days since last completed set). Cleared when loadBootData fires.
+  detrainingNotes: {}
 };
 
 // =============================================================
@@ -306,13 +314,19 @@ function localDateStr() {
 async function loadBootData() {
   // Refresh so midnight crossings pick up the new date without a reload
   APP.today = localDateStr();
+  var ydDate = new Date(APP.today + 'T00:00:00');
+  ydDate.setDate(ydDate.getDate() - 1);
+  var yesterdayStr = ydDate.getFullYear() + '-'
+    + String(ydDate.getMonth() + 1).padStart(2, '0') + '-'
+    + String(ydDate.getDate()).padStart(2, '0');
   try {
     await signIn();
-    var [stateRes, configRes, logRes, windowsRes] = await Promise.all([
+    var [stateRes, configRes, logRes, windowsRes, ydLogRes] = await Promise.all([
       db.from('plan_state').select('*').single(),
       db.from('plan_config').select('*').single(),
       db.from('daily_log').select('*').eq('log_date', APP.today).maybeSingle(),
-      db.from('structural_test_windows').select('*')
+      db.from('structural_test_windows').select('*'),
+      db.from('daily_log').select('cross_training_completed').eq('log_date', yesterdayStr).maybeSingle()
     ]);
 
     if (stateRes.error)  throw stateRes.error;
@@ -322,6 +336,11 @@ async function loadBootData() {
     APP.planConfig       = configRes.data;
     APP.todayLog         = logRes.data; // null = not checked in
     APP.structuralWindows = windowsRes.data || [];
+
+    // Recompute rest-day count for the current cycle before any advance logic fires.
+    // Must run after APP.planState is set and before advanceCycleDay() may reset the field.
+    await recomputeCycleRestDays();
+    await maybeAdvanceRomStage();
 
     // Seam buffer detection — runs BEFORE advance-pending to allow buffer-day interception.
     // Cursor stays at 8 through the buffer day; the 8→1 roll is deferred to the day after.
@@ -347,40 +366,58 @@ async function loadBootData() {
       }
     }
 
-    // Handle deferred day-advance (set when workout completed, applied next calendar day)
-    var advanceApplied = false;
-    var pendingRaw = localStorage.getItem('lift_advance_pending');
-    if (pendingRaw) {
+    // Handle deferred gym-day advance (written only by finishSession / stateMarkLiftDone).
+    // Applies independently of the cycle-day advance.
+    var gymDayPendingRaw = localStorage.getItem('lift_gym_day_pending');
+    if (gymDayPendingRaw) {
       try {
-        var pending = JSON.parse(pendingRaw);
-        if (pending.date === APP.today && pending.nextGymDay !== APP.planState.current_gym_day) {
-          // Still the same day and advance not yet applied — show completed state
-          APP.liftCompletedToday = true;
-        } else if (pending.date === APP.today) {
-          // Advance was already applied to DB — pending is stale, discard it
-          localStorage.removeItem('lift_advance_pending');
-        } else if (pending.date < APP.today) {
-          if (seaBufElapsed === 1) {
-            // Buffer day: pending is from yesterday's day-8 completion.
-            // Suppress the premature 8→1 roll — defer to tomorrow.
-            localStorage.removeItem('lift_advance_pending');
+        var gymPending = JSON.parse(gymDayPendingRaw);
+        if (gymPending.date === APP.today) {
+          // Same day: stale only if gym_day was already manually advanced to match.
+          if (gymPending.nextGymDay === APP.planState.current_gym_day) {
+            localStorage.removeItem('lift_gym_day_pending');
           } else {
-            // New day — apply the deferred advance now
-            await updatePlanState({ current_gym_day: pending.nextGymDay });
-            await advanceCycleDay();
-            localStorage.removeItem('lift_advance_pending');
-            advanceApplied = true;
+            APP.liftCompletedToday = true;
           }
+        } else if (gymPending.date < APP.today) {
+          // New day — apply gym-day cursor advance now.
+          await updatePlanState({ current_gym_day: gymPending.nextGymDay });
+          localStorage.removeItem('lift_gym_day_pending');
         }
       } catch(e) {
-        // Corrupted entry — discard it
-        localStorage.removeItem('lift_advance_pending');
+        localStorage.removeItem('lift_gym_day_pending');
       }
     }
 
-    // Deferred 8→1 roll for the day after the buffer day when no pending was applied.
+    // Handle deferred cycle-day advance (written by maybeWriteCycleDayAdvance when
+    // rehab + run are both logged; runs on every day type, independent of lift).
+    var cycleAdvanceApplied = false;
+    var cyclePendingRaw = localStorage.getItem('lift_cycle_day_pending');
+    if (cyclePendingRaw) {
+      try {
+        var cyclePending = JSON.parse(cyclePendingRaw);
+        if (cyclePending.date === APP.today) {
+          // Same day — keep it; nothing to apply until tomorrow.
+        } else if (cyclePending.date < APP.today) {
+          if (seaBufElapsed === 1) {
+            // Buffer day: pending is from yesterday's day-8 completion.
+            // Suppress the premature 8→1 roll — defer to tomorrow.
+            localStorage.removeItem('lift_cycle_day_pending');
+          } else {
+            // New day — apply the deferred cycle-day advance now.
+            await advanceCycleDay();
+            localStorage.removeItem('lift_cycle_day_pending');
+            cycleAdvanceApplied = true;
+          }
+        }
+      } catch(e) {
+        localStorage.removeItem('lift_cycle_day_pending');
+      }
+    }
+
+    // Deferred 8→1 roll for the day after the buffer day when no cycle advance was applied.
     // Handles lost-pending (cache cleared) and no-lift-on-buffer-day cases.
-    if (!advanceApplied && seaBufElapsed >= 2 && APP.planState.current_cycle_day === 8) {
+    if (!cycleAdvanceApplied && seaBufElapsed >= 2 && APP.planState.current_cycle_day === 8) {
       await advanceCycleDay();
     }
 
@@ -389,6 +426,10 @@ async function loadBootData() {
     var planRes = await db.from('cycle_plan').select('*').eq('day_number', dayNum).single();
     if (planRes.error) throw planRes.error;
     APP.todayPlan = planRes.data;
+
+    // Advisory: yesterday had cross-training, today has a scheduled run
+    APP.crossTrainingHeadsUp = !!(APP.todayPlan.run_miles !== null
+      && ydLogRes.data && ydLogRes.data.cross_training_completed);
 
     // Set buffer day state — only when seaBufElapsed === 1 (cursor still at 8)
     APP.isBufferDay = false;
@@ -420,7 +461,7 @@ async function loadBootData() {
       tomorrow.setDate(tomorrow.getDate() + 1);
       var tomorrowStr = tomorrow.toISOString().split('T')[0];
 
-      // DB fallback: if lift_advance_pending was lost (cache clear, different browser),
+      // DB fallback: if lift_gym_day_pending was lost (cache clear, different browser),
       // detect a completed session from the DB so the card still shows done.
       if (!APP.liftCompletedToday) {
         var doneSessRes = await db.from('sessions').select('id')
@@ -433,7 +474,7 @@ async function loadBootData() {
         if (doneSessRes.data) {
           APP.liftCompletedToday = true;
           var nextGymDay = (APP.planState.current_gym_day % 3) + 1;
-          localStorage.setItem('lift_advance_pending', JSON.stringify({
+          localStorage.setItem('lift_gym_day_pending', JSON.stringify({
             date: APP.today,
             nextGymDay: nextGymDay
           }));
@@ -694,7 +735,6 @@ var STANCE_LABELS = { 1: 'Shoulder width', 2: 'Feet together' };
 function stanceLabel(code) { return STANCE_LABELS[code] || 'Stance ' + code; }
 
 async function runStanceProgression(ex, setsData) {
-  if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
   var hasSkip = setsData.some(function(s) { return s.skipped; });
   if (hasSkip) return;
   var progressionConfirmed = setsData.some(function(s) { return s.progressionReady; });
@@ -727,7 +767,13 @@ async function runStanceProgression(ex, setsData) {
 async function runProgressionEngine(ex, setsData) {
   if (ex.progression_type === 'stance') return runStanceProgression(ex, setsData);
   if (ex.is_bodyweight) return;         // no weight to advance (ab roller etc)
-  if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) return;
+
+  // ROM hold: suppress all weight advances until the required ROM stage is reached.
+  // Front squats and single-leg bench squat require rom_stage 3 (full ROM).
+  if (ex.progression_hold_until_phase && APP.planState.rom_stage < ex.progression_hold_until_phase) return;
+
+  // Deload freeze: knee-loading exercises only — no clinical basis to freeze bench, rows, curls.
+  if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload && isKneeLoading(ex)) return;
 
   // Amber readiness: suppress weight advances for knee-loading exercises only.
   // Stall counting still runs so the failure streak isn't lost.
@@ -887,8 +933,97 @@ function progressionHint(ex) {
 }
 
 // =============================================================
+// ROM STAGE CURSOR
+// =============================================================
+
+var ROM_STAGE_LABELS = { 1: '45°', 2: '60°', 3: 'Full ROM' };
+
+// Checked each boot. If the current stage has been held for at least rom_stage_min_days,
+// advance to the next stage and reset the clock. Stops at stage 3 (full ROM).
+async function maybeAdvanceRomStage() {
+  var ps = APP.planState;
+  var pc = APP.planConfig;
+  if (!ps.rom_stage_started_on || ps.rom_stage >= 3) return;
+  var msPerDay = 86400000;
+  var daysInStage = Math.floor(
+    (new Date(APP.today + 'T00:00:00') - new Date(ps.rom_stage_started_on + 'T00:00:00')) / msPerDay
+  );
+  if (daysInStage >= pc.rom_stage_min_days) {
+    await updatePlanState({ rom_stage: ps.rom_stage + 1, rom_stage_started_on: APP.today });
+  }
+}
+
+// =============================================================
 // REHAB CURSOR + CYCLE EVALUATION
 // =============================================================
+
+// Recomputes current_cycle_rest_days from source of truth every boot.
+// A rest day = a calendar day where: run_completed not true, rehab_completed not true,
+// AND no completed lift session exists. Counts from the most recent cycle day-1 log
+// through yesterday (today is excluded — it isn't finished yet).
+async function recomputeCycleRestDays() {
+  var ps = APP.planState;
+
+  // Find calendar start of the current cycle
+  var startRes = await db.from('daily_log')
+    .select('log_date')
+    .eq('plan_phase', ps.current_phase)
+    .eq('plan_cycle_day', 1)
+    .order('log_date', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!startRes.data) return;
+
+  var cycleStart = startRes.data.log_date;
+
+  // Yesterday = end of range (today isn't finished)
+  var yDate = new Date(APP.today + 'T00:00:00');
+  yDate.setDate(yDate.getDate() - 1);
+  var yesterday = yDate.getFullYear() + '-'
+    + String(yDate.getMonth() + 1).padStart(2, '0') + '-'
+    + String(yDate.getDate()).padStart(2, '0');
+
+  if (yesterday < cycleStart) {
+    await updatePlanState({ current_cycle_rest_days: 0 });
+    return;
+  }
+
+  var logsRes = await db.from('daily_log')
+    .select('log_date, run_completed, rehab_completed, cross_training_completed')
+    .gte('log_date', cycleStart)
+    .lte('log_date', yesterday);
+  var logs = logsRes.data || [];
+
+  // completed_at IS NOT NULL filtered on a different column than the range filters — safe
+  var sessRes = await db.from('sessions')
+    .select('started_at')
+    .gte('started_at', cycleStart + 'T00:00:00')
+    .lt('started_at', APP.today + 'T00:00:00')
+    .not('completed_at', 'is', null);
+  var sessions = sessRes.data || [];
+
+  var activeDates = {};
+  for (var i = 0; i < logs.length; i++) {
+    var l = logs[i];
+    if (l.run_completed || l.rehab_completed || l.cross_training_completed) activeDates[l.log_date] = true;
+  }
+  for (var j = 0; j < sessions.length; j++) {
+    activeDates[localDateFromTs(sessions[j].started_at)] = true;
+  }
+
+  var restCount = 0;
+  var cur = new Date(cycleStart + 'T00:00:00');
+  var endDate = new Date(yesterday + 'T00:00:00');
+  while (cur <= endDate) {
+    var dStr = cur.getFullYear() + '-'
+      + String(cur.getMonth() + 1).padStart(2, '0') + '-'
+      + String(cur.getDate()).padStart(2, '0');
+    if (!activeDates[dStr]) restCount++;
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  await updatePlanState({ current_cycle_rest_days: restCount });
+}
 
 async function advanceCycleDay() {
   var ps = APP.planState;
@@ -1026,6 +1161,39 @@ async function checkStructuralWindows(phase) {
 // FLARE + DELOAD STATE MACHINE
 // =============================================================
 
+// Shared consequence logic for any confirmed flare (morning check-in or flagged run).
+// Marks cycle dirty, increments flare count, enters deload, regresses phase if threshold hit.
+// Also resets the ROM clock — a flare means the deepening window must restart.
+async function applyFlareConsequences() {
+  var pc = APP.planConfig;
+  var ps = APP.planState;
+  var patch = {
+    current_cycle_clean: false,
+    phase_flare_count:   ps.phase_flare_count + 1
+  };
+  if (!ps.in_deload) {
+    patch.in_deload = true;
+    patch.deload_started_on = APP.today;
+  }
+  if (patch.phase_flare_count >= pc.flares_before_regress && ps.current_phase > 1) {
+    patch.current_phase           = ps.current_phase - 1;
+    patch.current_cycle_day       = 1;
+    patch.clean_cycles_completed  = 0;
+    patch.phase_flare_count       = 0;
+    patch.current_cycle_clean     = true;
+    patch.current_cycle_rest_days = 0;
+    patch.in_deload               = true;
+    patch.deload_started_on       = APP.today;
+  }
+  if (ps.rom_stage < 3) {
+    patch.rom_stage_started_on = APP.today;
+  }
+  await updatePlanState(patch);
+  var dayNum = (APP.planState.current_phase - 1) * 8 + APP.planState.current_cycle_day;
+  var planRes = await db.from('cycle_plan').select('*').eq('day_number', dayNum).single();
+  if (!planRes.error) APP.todayPlan = planRes.data;
+}
+
 async function evaluateFlare(painLevel, jointFullness) {
   var pc = APP.planConfig;
   var ps = APP.planState;
@@ -1050,42 +1218,19 @@ async function evaluateFlare(painLevel, jointFullness) {
     return;
   }
 
-  // It's a flare
-  var patch = {
-    current_cycle_clean: false,
-    phase_flare_count:   ps.phase_flare_count + 1
-  };
-
-  if (!ps.in_deload) {
-    patch.in_deload = true;
-    patch.deload_started_on = APP.today;
-  }
-
-  // Check regression: Nth flare in phase (>= flares_before_regress) and not already in phase 1
-  if (patch.phase_flare_count >= pc.flares_before_regress && ps.current_phase > 1) {
-    patch.current_phase          = ps.current_phase - 1;
-    patch.current_cycle_day      = 1;
-    patch.clean_cycles_completed = 0;
-    patch.phase_flare_count      = 0;
-    patch.current_cycle_clean    = true;
-    patch.current_cycle_rest_days = 0;
-    patch.in_deload              = true;
-    patch.deload_started_on      = APP.today;
-  }
-
-  await updatePlanState(patch);
-
-  // Reload plan for potentially new phase/day
-  var dayNum = (APP.planState.current_phase - 1) * 8 + APP.planState.current_cycle_day;
-  var planRes = await db.from('cycle_plan').select('*').eq('day_number', dayNum).single();
-  if (!planRes.error) APP.todayPlan = planRes.data;
+  await applyFlareConsequences();
 }
 
-// Also called when a niggle-skip is logged during a workout
+// Called when a niggle-skip is logged. Marks the cycle dirty and resets the ROM clock.
+// Run+lift-day / knee-loading exemption is enforced at the call sites (doSkipSet,
+// skipWholeExercise) — if we reach this function the skip genuinely counts.
 async function markNiggleFlare() {
   var ps = APP.planState;
-  if (ps.current_cycle_clean) {
-    await updatePlanState({ current_cycle_clean: false });
+  var patch = {};
+  if (ps.current_cycle_clean) patch.current_cycle_clean = false;
+  if (ps.rom_stage < 3) patch.rom_stage_started_on = APP.today;
+  if (Object.keys(patch).length > 0) {
+    await updatePlanState(patch);
   }
 }
 
@@ -1384,6 +1529,12 @@ function rToday() {
         runCardSub = null;
       }
     }
+    if (APP.crossTrainingHeadsUp) {
+      html += '<div style="margin-bottom:6px;padding:10px 14px;background:var(--color-bg-info);border:0.5px solid var(--color-text-info);border-radius:var(--radius-md);font-size:12px;color:var(--color-text-info)">'
+        + '<i class="ti ti-info-circle" style="margin-right:5px"></i>'
+        + ‘Run-equivalent cross-training logged yesterday — consider easing today’s run.’
+        + '</div>';
+    }
     html += actCard(runCardIcon, 'var(--color-bg-info)', 'var(--color-text-info)', runCardLabel, runCardVal,
       runCardSub, 'toggleRun()', runLogged);
     if (!runLogged) {
@@ -1427,6 +1578,19 @@ function rToday() {
   } else {
     // Ad-hoc lift: not scheduled, but always available
     html += rAdHocLiftCard();
+  }
+
+  // Nudge on scheduled lift days: rehab is worth doing even if the lift doesn't happen.
+  // Only shown when lift is neither done nor in-progress and rehab hasn't been logged.
+  if (tp.is_lift_day && !APP.isBufferDay && !APP.liftCompletedToday && !APP.sessionId && !rehabLogged) {
+    html += '<p style="text-align:center;font-size:12px;color:var(--color-text-secondary);margin-top:-2px;margin-bottom:8px">'
+      + 'No time to lift today? Still worth doing today\'s rehab — 5 min.</p>';
+  }
+
+  // Cross-training card — shown on non-run days; parallel to the run card's "Log instead" button
+  // but distinct: sets cross_training_completed=true, does NOT set run_completed
+  if (!tp.run_miles && !APP.isBufferDay) {
+    html += rCrossTrainingCard();
   }
 
   // Rehab after run/lift if timing is after
@@ -1561,6 +1725,28 @@ function rAdHocLiftCard() {
     + '</div>';
 }
 
+function rCrossTrainingCard() {
+  var done = !!(APP.todayLog && APP.todayLog.cross_training_completed);
+  if (done) {
+    var actType = APP.todayLog.activity_type || '';
+    var actMatch = null;
+    for (var i = 0; i < ALTERNATE_ACTIVITIES.length; i++) {
+      if (ALTERNATE_ACTIVITIES[i].type === actType) { actMatch = ALTERNATE_ACTIVITIES[i]; break; }
+    }
+    var doneLabel = actMatch ? actMatch.label + ' logged' : 'Cross-training logged';
+    var doneIcon  = actMatch ? actMatch.icon : 'ti-activity';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:10px;opacity:0.6">'
+      + '<i class="ti ' + doneIcon + '" style="font-size:14px;color:var(--color-text-tertiary)"></i>'
+      + '<span style="font-size:12px;color:var(--color-text-tertiary)">' + doneLabel + '</span>'
+      + '<i class="ti ti-check" style="font-size:13px;color:var(--color-text-tertiary);margin-left:2px"></i>'
+      + '</div>';
+  }
+  return '<div style="text-align:right;margin-bottom:10px">'
+    + '<button onclick="showCrossTrainingPicker()" style="border:none;background:transparent;font-size:12px;color:var(--color-text-tertiary);padding:4px 0;cursor:pointer">'
+    + '<i class="ti ti-activity" style="font-size:12px;margin-right:4px"></i>Log run-equivalent activity →</button>'
+    + '</div>';
+}
+
 function rProgressSummary() {
   var ps = APP.planState;
   var pc = APP.planConfig;
@@ -1582,6 +1768,29 @@ function rProgressSummary() {
       + '<i class="ti ti-alert-triangle" style="margin-right:4px"></i>Last cycle: Flared</div>';
   }
 
+  var romHtml = '';
+  if (ps.rom_stage !== undefined) {
+    var romLabel = ROM_STAGE_LABELS[ps.rom_stage] || ('Stage ' + ps.rom_stage);
+    var romDays = 0;
+    if (ps.rom_stage_started_on) {
+      romDays = Math.floor(
+        (new Date(APP.today + 'T00:00:00') - new Date(ps.rom_stage_started_on + 'T00:00:00')) / 86400000
+      );
+    }
+    if (ps.rom_stage < 3) {
+      var romDaysLeft = Math.max(0, pc.rom_stage_min_days - romDays);
+      romHtml = '<div style="margin-top:10px;padding:8px 12px;background:var(--color-bg);border:0.5px solid var(--color-border);border-radius:var(--radius-md);font-size:12px">'
+        + '<i class="ti ti-angle" style="margin-right:4px;color:var(--color-text-secondary)"></i>'
+        + '<span style="font-weight:500">ROM: ' + romLabel + '</span>'
+        + ' · day ' + romDays + ' of ' + pc.rom_stage_min_days
+        + (romDaysLeft > 0 ? ' · ' + romDaysLeft + ' days until deepening' : ' · ready to advance')
+        + '</div>';
+    } else {
+      romHtml = '<div style="margin-top:10px;padding:8px 12px;background:var(--color-bg-success);border:0.5px solid var(--color-text-success);border-radius:var(--radius-md);font-size:12px;color:var(--color-text-success)">'
+        + '<i class="ti ti-circle-check" style="margin-right:4px"></i>ROM: Full — squat depth progression unlocked</div>';
+    }
+  }
+
   return '<div style="margin-top:20px;padding:16px;background:var(--color-bg-secondary);border-radius:var(--radius-lg)">'
     + '<p style="font-size:13px;font-weight:500;margin-bottom:12px">' + sectionLabel + '</p>'
     + '<div style="display:flex;gap:12px">'
@@ -1590,6 +1799,7 @@ function rProgressSummary() {
     + rStatBox('Cycle day', ps.current_cycle_day + ' / 8', '')
     + '</div>'
     + (phasePct > 0 ? '<div style="margin-top:12px"><div style="height:4px;background:var(--color-bg-tertiary);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + Math.min(phasePct, 100) + '%;background:var(--color-text-success);border-radius:2px"></div></div><p style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">' + phasePct + '% toward phase advance</p></div>' : '')
+    + romHtml
     + outcomeHtml
     + '</div>';
 }
@@ -2169,6 +2379,18 @@ function rExerciseRow(ex, idx, total) {
       + '<i class="ti ti-trending-up" style="font-size:11px;margin-right:4px"></i>' + hint + '</div>';
   }
 
+  if (isActive && ex.progression_hold_until_phase && APP.planState && APP.planState.rom_stage < ex.progression_hold_until_phase) {
+    html += '<div style="margin-top:6px;font-size:11px;color:var(--color-text-secondary)">'
+      + '<i class="ti ti-lock" style="font-size:11px;margin-right:4px"></i>'
+      + 'ROM ' + (ROM_STAGE_LABELS[APP.planState.rom_stage] || APP.planState.rom_stage) + ' — progression held until full ROM</div>';
+  }
+
+  if (isActive && APP.detrainingNotes && APP.detrainingNotes[ex.id]) {
+    html += '<div style="margin-top:6px;font-size:11px;color:var(--color-text-warning)">'
+      + '<i class="ti ti-clock-pause" style="font-size:11px;margin-right:4px"></i>'
+      + APP.detrainingNotes[ex.id] + '</div>';
+  }
+
   html += '</div>';
   return html;
 }
@@ -2244,9 +2466,13 @@ function rLogSet() {
     }
   }
 
+  var detrain = setIdx === 0 && APP.detrainingNotes && APP.detrainingNotes[ex.id]
+    ? APP.detrainingNotes[ex.id] : '';
   var hasSubtitle = ex.form_cue || isRepLadder;
   var html = '<div style="padding-top:12px">'
     + '<button onclick="APP.screen=\'workout\';render()" style="display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:0;color:var(--color-text-secondary);font-size:14px;margin-bottom:20px"><i class="ti ti-arrow-left" style="font-size:16px"></i> Back</button>'
+    + (detrain ? '<div style="padding:10px 14px;background:var(--color-bg-warning);border:0.5px solid var(--color-text-warning);border-radius:var(--radius-md);font-size:12px;color:var(--color-text-warning);margin-bottom:14px">'
+        + '<i class="ti ti-clock-pause" style="margin-right:5px"></i>' + detrain + '</div>' : '')
     + (doneHtml ? '<div style="margin-bottom:16px">' + doneHtml + '</div>' : '')
     + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:4px">Set ' + (setIdx+1) + ' of 3 · ' + ex.name + '</p>'
     + '<div style="font-size:' + weightFontSize + ';font-weight:' + weightFontWeight + ';line-height:1;letter-spacing:-1px;margin-bottom:' + (hasSubtitle ? '12px' : '28px') + '">' + weightDisplay + '</div>'
@@ -2265,6 +2491,11 @@ function rLogSet() {
     + (setIdx === 2 && (!ex.is_bodyweight || ex.progression_type === 'stance')
       ? (function() {
           var hint = progressionHint(ex);
+          if (ex.progression_hold_until_phase && APP.planState.rom_stage < ex.progression_hold_until_phase) {
+            return '<p style="text-align:center;font-size:13px;color:var(--color-text-secondary);margin-top:10px">'
+              + '<i class="ti ti-lock" style="font-size:12px;margin-right:4px"></i>'
+              + 'ROM ' + (ROM_STAGE_LABELS[APP.planState.rom_stage] || APP.planState.rom_stage) + ' — weight progression unlocks at full ROM</p>';
+          }
           if (APP.readiness === 'amber' && ex.progression_type !== 'stance' && isKneeLoading(ex)) {
             return '<p style="text-align:center;font-size:13px;color:var(--color-text-warning);margin-top:10px">Amber — knee load held flat today</p>';
           }
@@ -2360,6 +2591,82 @@ async function saveCheckin() {
   }
 }
 
+// Called once per fresh session start. Queries each weighted exercise's last completed
+// set date. If >14 days elapsed, applies a 10% deload to set3 and re-enters catch_up_set2.
+// Bodyweight and stance exercises are skipped. Not called for resumed (in-progress) sessions.
+async function checkDetrain() {
+  var gymDay = APP.planState.current_gym_day;
+  var weightedExes = APP.exercises.filter(function(ex) {
+    return !ex.is_bodyweight && ex.progression_type !== 'stance';
+  });
+  if (!weightedExes.length) return;
+  // Deload freeze scoped to knee-loading only — non-knee exercises can still be checked.
+  if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload) {
+    weightedExes = weightedExes.filter(function(ex) { return !isKneeLoading(ex); });
+    if (!weightedExes.length) return;
+  }
+
+  // Find last 10 completed sessions for this gym day (enough history to cover any exercise)
+  var sessRes = await db.from('sessions')
+    .select('id, started_at')
+    .eq('gym_day', gymDay)
+    .not('completed_at', 'is', null)
+    .order('started_at', { ascending: false })
+    .limit(10);
+  if (!sessRes.data || !sessRes.data.length) return;
+
+  var sessionIds = sessRes.data.map(function(s) { return s.id; });
+  var exerciseIds = weightedExes.map(function(ex) { return ex.id; });
+
+  var setsRes = await db.from('session_sets')
+    .select('exercise_id, session_id')
+    .in('exercise_id', exerciseIds)
+    .in('session_id', sessionIds)
+    .eq('set_status', 'completed');
+  if (!setsRes.data) return;
+
+  // Build session-id → started_at lookup
+  var sessDateById = {};
+  sessRes.data.forEach(function(s) { sessDateById[s.id] = s.started_at; });
+
+  // Find most recent completed-set date per exercise
+  var lastDateByEx = {};
+  setsRes.data.forEach(function(ss) {
+    var d = sessDateById[ss.session_id];
+    if (d && (!lastDateByEx[ss.exercise_id] || d > lastDateByEx[ss.exercise_id])) {
+      lastDateByEx[ss.exercise_id] = d;
+    }
+  });
+
+  APP.detrainingNotes = {};
+  var todayMs = new Date(APP.today + 'T00:00:00').getTime();
+
+  for (var i = 0; i < weightedExes.length; i++) {
+    var ex = weightedExes[i];
+    var lastDate = lastDateByEx[ex.id];
+    if (!lastDate) continue; // new exercise — no deload
+
+    var daysElapsed = Math.round((todayMs - new Date(lastDate).getTime()) / 86400000);
+    if (daysElapsed <= 14) continue;
+
+    // Detraining deload: set3 -10% (same math as stall deload), re-enter catch_up_set2.
+    // consecutive_failures reset to 0 — this is a layoff, not a rep-floor failure.
+    var st = ex.state;
+    var newS3 = Math.round((st.set3_weight * 0.9) / 5) * 5;
+    var targets = classicTargets(newS3);
+    var patch = {
+      set3_weight:          newS3,
+      set2_weight:          Math.min(st.set2_weight, targets.target_s2),
+      set1_weight:          Math.min(st.set1_weight, targets.target_s1),
+      progression_state:    'catch_up_set2',
+      consecutive_failures: 0
+    };
+    await updateExerciseState(ex.id, patch);
+    Object.assign(ex.state, patch);
+    APP.detrainingNotes[ex.id] = daysElapsed + ' days since your last set here — weight adjusted down 10%';
+  }
+}
+
 async function startWorkout() {
   await requestNotificationPermission();
   if (!APP.exercises || !APP.exercises.length) {
@@ -2371,6 +2678,8 @@ async function startWorkout() {
     }
   }
   if (!APP.sessionId) {
+    // Check for detraining deload before creating the session (fresh starts only).
+    try { await checkDetrain(); } catch(e) { console.error('Detrain check failed:', e); }
     try {
       await createSession(APP.planState.current_gym_day);
     } catch (e) {
@@ -2531,7 +2840,7 @@ async function finishSession() {
     // Defer the day-advance until tomorrow so today's dashboard stays on today's plan.
     // loadBootData() will apply this when APP.today > pending.date.
     var nextGymDay = (APP.planState.current_gym_day % 3) + 1;
-    localStorage.setItem('lift_advance_pending', JSON.stringify({
+    localStorage.setItem('lift_gym_day_pending', JSON.stringify({
       date: APP.today,
       nextGymDay: nextGymDay
     }));
@@ -2720,7 +3029,7 @@ async function saveStateCursor() {
 
 function stateMarkLiftNotDone() {
   APP.liftCompletedToday = false;
-  localStorage.removeItem('lift_advance_pending');
+  localStorage.removeItem('lift_gym_day_pending');
   closeStatePanel();
   render();
 }
@@ -2728,7 +3037,7 @@ function stateMarkLiftNotDone() {
 function stateMarkLiftDone() {
   APP.liftCompletedToday = true;
   var nextGymDay = (APP.planState.current_gym_day % 3) + 1;
-  localStorage.setItem('lift_advance_pending', JSON.stringify({
+  localStorage.setItem('lift_gym_day_pending', JSON.stringify({
     date: APP.today,
     nextGymDay: nextGymDay
   }));
@@ -3025,16 +3334,52 @@ function toggleProgressionReady() {
   render();
 }
 
-function maybeWriteNonLiftAdvance() {
-  // On non-lift days, write the deferred advance when both run and rehab are done.
-  // gym_day cursor does not change on non-lift days — only cycle_day advances.
-  if (APP.todayPlan.is_lift_day || APP.isBufferDay) return;
-  if (!APP.todayLog || !APP.todayLog.run_completed || !APP.todayLog.rehab_completed) return;
-  if (localStorage.getItem('lift_advance_pending')) return;
-  localStorage.setItem('lift_advance_pending', JSON.stringify({
-    date: APP.today,
-    nextGymDay: APP.planState.current_gym_day
+function maybeWriteCycleDayAdvance() {
+  // Write the deferred cycle-day advance once rehab (and run, if scheduled) are done.
+  // Runs on every day type — lift days included. gym_day is NOT touched here.
+  // Buffer days are excluded: their 8→1 roll is handled by seam-buffer detection in loadBootData.
+  if (APP.isBufferDay) return;
+  if (!APP.todayLog || !APP.todayLog.rehab_completed) return;
+  // If today has a scheduled run, both run and rehab must be complete before advancing.
+  if (APP.todayPlan.run_miles !== null && !APP.todayLog.run_completed) return;
+  if (localStorage.getItem('lift_cycle_day_pending')) return;
+  localStorage.setItem('lift_cycle_day_pending', JSON.stringify({
+    date: APP.today
   }));
+}
+
+function showRunOutcomePicker() {
+  var overlay = document.createElement('div');
+  overlay.id = 'run-outcome-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  overlay.innerHTML = '<div style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px">'
+    + '<p style="font-size:16px;font-weight:500;margin-bottom:6px">How did that run feel?</p>'
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:16px">Flagged = sharp pain, altered gait, or early abort</p>'
+    + '<button onclick="closeRunOutcomePicker();saveRunOutcome(\'clean\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center"><i class="ti ti-circle-check" style="color:var(--color-text-success)"></i>Clean — felt fine</button>'
+    + '<button onclick="closeRunOutcomePicker();saveRunOutcome(\'flagged\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center"><i class="ti ti-alert-triangle" style="color:var(--color-text-warning)"></i>Flagged — sharp pain, altered gait, or stopped early</button>'
+    + '<button onclick="closeRunOutcomePicker()" style="width:100%;padding:14px;border:none;background:transparent;font-size:14px;color:var(--color-text-secondary)">Skip for now</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeRunOutcomePicker(); });
+}
+
+function closeRunOutcomePicker() {
+  var el = document.getElementById('run-outcome-overlay');
+  if (el) el.remove();
+}
+
+async function saveRunOutcome(outcome) {
+  var { error } = await db.from('daily_log')
+    .update({ run_outcome: outcome })
+    .eq('log_date', APP.today);
+  if (!error) {
+    if (APP.todayLog) APP.todayLog.run_outcome = outcome;
+    if (outcome === 'flagged') {
+      await applyFlareConsequences();
+      await refreshReadiness();
+    }
+  }
+  render();
 }
 
 async function toggleRun() {
@@ -3042,15 +3387,18 @@ async function toggleRun() {
   var newVal = !APP.todayLog.run_completed;
   var patch = { run_completed: newVal };
   if (newVal) patch.activity_type = 'run';
+  if (!newVal) patch.run_outcome = null;
   var { error } = await db.from('daily_log')
     .update(patch)
     .eq('log_date', APP.today);
   if (!error) {
     APP.todayLog.run_completed = newVal;
     if (newVal) APP.todayLog.activity_type = 'run';
-    maybeWriteNonLiftAdvance();
+    if (!newVal) APP.todayLog.run_outcome = null;
+    maybeWriteCycleDayAdvance();
   }
   render();
+  if (!error && newVal) showRunOutcomePicker();
 }
 
 function showActivityPicker() {
@@ -3084,7 +3432,49 @@ async function logAlternateActivity(type) {
   if (!error) {
     APP.todayLog.run_completed = true;
     APP.todayLog.activity_type = type;
-    maybeWriteNonLiftAdvance();
+    maybeWriteCycleDayAdvance();
+  }
+  render();
+  if (!error) showRunOutcomePicker();
+}
+
+// Cross-training picker and logger — for non-run days (run_miles is null).
+// Sets cross_training_completed=true only; run_completed stays false.
+// Reuses the same ALTERNATE_ACTIVITIES list and activity-overlay idiom.
+function showCrossTrainingPicker() {
+  if (!APP.todayLog) { goCheckin(); return; }
+  var overlay = document.createElement('div');
+  overlay.id = 'activity-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  var btns = ALTERNATE_ACTIVITIES.map(function(a) {
+    return '<button onclick="closeActivityPicker();logCrossTraining(\'' + a.type + '\')" style="width:100%;padding:16px;border:0.5px solid var(--color-border);border-radius:var(--radius-md);background:transparent;font-size:15px;text-align:left;margin-bottom:8px;display:flex;gap:10px;align-items:center">'
+      + '<i class="ti ' + a.icon + '" style="color:var(--color-text-info)"></i>' + a.label + '</button>';
+  }).join('');
+  overlay.innerHTML = '<div style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px">'
+    + '<p style="font-size:16px;font-weight:500;margin-bottom:16px">Log run-equivalent activity</p>'
+    + btns
+    + '<button onclick="closeActivityPicker()" style="width:100%;padding:14px;border:none;background:transparent;font-size:14px;color:var(--color-text-secondary)">Cancel</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeActivityPicker(); });
+}
+
+async function logCrossTraining(type) {
+  if (!APP.todayLog) { goCheckin(); return; }
+  var payload = {
+    user_id:                  APP.userId,
+    log_date:                 APP.today,
+    plan_phase:               APP.planState.current_phase,
+    plan_cycle_day:           APP.planState.current_cycle_day,
+    cross_training_completed: true,
+    activity_type:            type
+  };
+  var { data, error } = await db.from('daily_log')
+    .upsert(payload, { onConflict: 'user_id,log_date' })
+    .select()
+    .single();
+  if (!error && data) {
+    APP.todayLog = data;
   }
   render();
 }
@@ -3097,7 +3487,7 @@ async function toggleRehab() {
     .eq('log_date', APP.today);
   if (!error) {
     APP.todayLog.rehab_completed = newVal;
-    maybeWriteNonLiftAdvance();
+    maybeWriteCycleDayAdvance();
   }
   render();
 }
@@ -3213,7 +3603,7 @@ async function rehabMarkComplete() {
     .eq('log_date', APP.today);
   if (!error) {
     APP.todayLog.rehab_completed = true;
-    maybeWriteNonLiftAdvance();
+    maybeWriteCycleDayAdvance();
   }
   render();
 }

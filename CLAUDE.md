@@ -64,7 +64,7 @@ Read `.claude/rules/frontend.md` when working on JS conventions, render model, t
 
 **Progression engine** (`runProgressionEngine`, `progressionVariant`, `classicTargets`, `repFloor`): two modes (rep-ladder vs classic catch-up); catch-up advances set3→set2→set1; 5 lb increments only; opt-in via user confirmation; stall/deload automatic.
 
-**Rehab cursor** (`advanceCycleDay`): one cycle-day per completed session (not calendar). On day-8 roll, evaluates cycle for cleanliness; clean cycles bank toward phase advance.
+**Rehab cursor** (`advanceCycleDay`): one cycle-day per completed rehab+run session (not per lift, not per calendar day). `current_cycle_day` advances once `run_completed` + `rehab_completed` are both true (or just `rehab_completed` when no run is scheduled). `current_gym_day` advances only on lift completion, independently. On day-8 roll, evaluates cycle for cleanliness; clean cycles bank toward phase advance.
 
 **Flare + deload** (`evaluateFlare`, `markNiggleFlare`): flare = pain ≥ threshold, swelling, niggle-skip, or flagged run. 1st flare → relative rest deload. 2nd flare before a clean cycle → regress one phase.
 
@@ -73,8 +73,9 @@ Read `.claude/rules/frontend.md` when working on JS conventions, render model, t
 ## Invariants (never change without confirmation)
 
 - **Local date only:** `localDateStr()` for all `log_date` comparisons. Never `toISOString()`.
-- **Deferred day-advance:** finishing a workout writes `lift_advance_pending` to `localStorage`; `loadBootData()` applies it the next calendar day. Do not make this immediate.
-- **Cursor is per-session, not per-date.** Rest days don't break cycles. `current_gym_day` never resets.
+- **Two independent deferred advances:** `lift_cycle_day_pending` (written by `maybeWriteCycleDayAdvance` when rehab+run done; triggers `advanceCycleDay()` next morning) and `lift_gym_day_pending` (written by `finishSession` when lift completes; triggers `current_gym_day` cursor update next morning). They are independent — the cycle can advance without a lift having happened. Do not conflate or re-merge them.
+- **Cycle cursor is per-rehab+run session, not per-date and not per-lift.** Missing a lift does not stall the run program. `current_gym_day` advances only on actual lift completion.
+- **`current_gym_day` never resets.** It can lag behind the cycle cursor by any number of days.
 - **`plan_config` is the single source for thresholds.**
 - **Schema comments are authoritative.** When `index.html` logic and a schema comment disagree, the comment wins — reconcile, don't guess.
 - **Settled design decisions:** progression math, flare/deload/regression model, ROM-gating, rest timers (60 s / 180 s), superset rules. Don't re-litigate. Ask Ben for genuinely open questions (e.g. coach UX layer).
@@ -88,7 +89,6 @@ Read `.claude/rules/frontend.md` when working on JS conventions, render model, t
 
 ## Open items
 
-- **Migration 002** not yet applied to live Supabase (`run_outcome` + flagged-run flare).
 - **RLS** — anon key is public; verify policies before multi-user exposure.
 - **Coach UX** on daily check-in is undesigned. Keep rules-based (no LLM) unless decided otherwise.
 - Deferred: LM Studio + Qwen for AI analysis.
