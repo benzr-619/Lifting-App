@@ -344,25 +344,31 @@ async function loadBootData() {
 
     // Seam buffer detection — runs BEFORE advance-pending to allow buffer-day interception.
     // Cursor stays at 8 through the buffer day; the 8→1 roll is deferred to the day after.
-    // Detection: if cursor is at day 8 of a seam-boundary phase, check daily_log for the
-    // most recent completed day-8 anchor (run+rehab done). elapsed=1 → today is buffer day;
-    // elapsed≥2 → buffer day has passed, apply the deferred roll.
+    // The day-8 anchor query is scoped to the current cycle pass (>= cycle start date) so
+    // that stale completions from earlier passes through the same phase are ignored.
+    // If no cycle-start anchor exists, skip detection entirely (seaBufElapsed stays -1).
+    // Bug fixed 2026-07-14: without the gte scoping, repeated passes through a seam-boundary
+    // phase would pick up a prior pass's day-8 completion and fire a spurious 8→1 roll.
     var seaBufElapsed = -1;
     var samePhaseOutgoingNum = (APP.planState.current_phase - 1) * 8 + 8;
     if (APP.planState.current_cycle_day === 8 && SEAM_BUFFER_OUTGOING_DAYS[samePhaseOutgoingNum]) {
-      var anchorRes = await db.from('daily_log')
-        .select('log_date')
-        .eq('plan_phase', APP.planState.current_phase)
-        .eq('plan_cycle_day', 8)
-        .eq('run_completed', true)
-        .eq('rehab_completed', true)
-        .order('log_date', {ascending: false})
-        .limit(1)
-        .maybeSingle();
-      if (anchorRes.data) {
-        var anchorDate = new Date(anchorRes.data.log_date + 'T00:00:00');
-        var todayDate  = new Date(APP.today + 'T00:00:00');
-        seaBufElapsed  = Math.round((todayDate - anchorDate) / 86400000);
+      var seaBufCycleStart = await getCycleStartDate(APP.planState.current_phase);
+      if (seaBufCycleStart) {
+        var anchorRes = await db.from('daily_log')
+          .select('log_date')
+          .eq('plan_phase', APP.planState.current_phase)
+          .eq('plan_cycle_day', 8)
+          .eq('run_completed', true)
+          .eq('rehab_completed', true)
+          .gte('log_date', seaBufCycleStart)
+          .order('log_date', {ascending: false})
+          .limit(1)
+          .maybeSingle();
+        if (anchorRes.data) {
+          var anchorDate = new Date(anchorRes.data.log_date + 'T00:00:00');
+          var todayDate  = new Date(APP.today + 'T00:00:00');
+          seaBufElapsed  = Math.round((todayDate - anchorDate) / 86400000);
+        }
       }
     }
 
@@ -417,8 +423,14 @@ async function loadBootData() {
 
     // Deferred 8→1 roll for the day after the buffer day when no cycle advance was applied.
     // Handles lost-pending (cache cleared) and no-lift-on-buffer-day cases.
+    // Safety rail: if seaBufElapsed is implausibly large (>7) something is wrong upstream —
+    // log a warning and skip rather than silently mutating plan_state.
     if (!cycleAdvanceApplied && seaBufElapsed >= 2 && APP.planState.current_cycle_day === 8) {
-      await advanceCycleDay();
+      if (seaBufElapsed > 7) {
+        console.warn('[seam-buffer] seaBufElapsed=' + seaBufElapsed + ' is implausibly large; skipping auto-roll. Investigate before proceeding.');
+      } else {
+        await advanceCycleDay();
+      }
     }
 
     // Compute cycle_plan day_number from cursor (after any advance applied above)
@@ -961,20 +973,27 @@ async function maybeAdvanceRomStage() {
 // A rest day = a calendar day where: run_completed not true, rehab_completed not true,
 // AND no completed lift session exists. Counts from the most recent cycle day-1 log
 // through yesterday (today is excluded — it isn't finished yet).
-async function recomputeCycleRestDays() {
-  var ps = APP.planState;
-
-  // Find calendar start of the current cycle
-  var startRes = await db.from('daily_log')
+// Returns the calendar start date (log_date string) of the current pass through
+// the given phase — the most recent daily_log row with plan_cycle_day = 1 for that
+// phase.  Returns null if no such row exists (brand-new phase, never had a day-1
+// entry yet).  Shared by recomputeCycleRestDays, checkStructuralWindows, and the
+// seam-buffer anchor query so all three are scoped to the same cycle pass.
+async function getCycleStartDate(phase) {
+  var res = await db.from('daily_log')
     .select('log_date')
-    .eq('plan_phase', ps.current_phase)
+    .eq('plan_phase', phase)
     .eq('plan_cycle_day', 1)
     .order('log_date', { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (!startRes.data) return;
+  return res.data ? res.data.log_date : null;
+}
 
-  var cycleStart = startRes.data.log_date;
+async function recomputeCycleRestDays() {
+  var ps = APP.planState;
+
+  var cycleStart = await getCycleStartDate(ps.current_phase);
+  if (!cycleStart) return;
 
   // Yesterday = end of range (today isn't finished)
   var yDate = new Date(APP.today + 'T00:00:00');
@@ -1099,16 +1118,9 @@ async function checkStructuralWindows(phase) {
   }
   if (!windows.length) return false;
 
-  // Scope to this cycle pass: find the most recent daily_log with plan_cycle_day=1
-  // for this phase — that is the calendar start of the current 8-day cycle.
-  var startRes = await db.from('daily_log')
-    .select('log_date')
-    .eq('plan_phase', phase)
-    .eq('plan_cycle_day', 1)
-    .order('log_date', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  var cycleStartDate = startRes.data ? startRes.data.log_date : '1970-01-01';
+  // Scope to this cycle pass via shared helper (same anchor as recomputeCycleRestDays).
+  // Fall back to epoch if no day-1 row exists so windows still evaluate against all history.
+  var cycleStartDate = (await getCycleStartDate(phase)) || '1970-01-01';
 
   for (var i = 0; i < windows.length; i++) {
     var w = windows[i];
