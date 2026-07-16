@@ -29,8 +29,8 @@ When `progressionVariant` returns `'rep_ladder'` and `progState === 'ready'`:
 - **Ceiling** = `goal_reps + 5`. Hitting ceiling on set 3 + confirm → advance set3 weight by 5 lbs, enter `catch_up_set2`.
 - Below ceiling but ≥ goal → stay `ready`, no weight change.
 - `catch_up_set2` / `catch_up_set1` in rep-ladder fall through to **classic** catch-up logic.
-- `pendingReps` pre-filled with ceiling (not goal) for rep-ladder exercises so the target is visible at the gym.
-- Hint on set 3 shows: `"Hit <ceiling> reps on set 3 → advance to <next> lbs"`.
+- `defaultReps(ex, setIdx)` pre-fill per set: sets 1–2 (`setIdx` 0–1) → `goal_reps`; set 3 (`setIdx` 2) → ceiling (`goal_reps + 5`). Catch-up states (`catch_up_set2`, `catch_up_set1`) always use `goal_reps` regardless of set.
+- Hint on set 3 shows: `"Hit <ceiling> reps on set 3 → advance to <next> lbs"`. Sets 1–2 show a reminder info line pointing to the set-3 target.
 
 ## Classic catch-up state machine
 Advance order: set3 first, then set2, then set1.
@@ -87,3 +87,43 @@ Called once per fresh session start (not for resumed sessions). Checks calendar 
 - Main exercises: "Skip…" button → reason sheet (niggle / travel / other).
 - Optional finishers: one-tap "Skip", no reason required.
 - Niggle skips trigger `markNiggleFlare`.
+
+---
+
+## Clinical rationale ("why" for each major rule)
+
+Rules in this file encode specific clinical and engineering decisions. This section documents which are evidence-derived vs. deliberate engineering choices, so a future agent knows which are safe to tune without re-checking the literature.
+
+### Amber suppression scoped to knee-loading exercises only (`isKneeLoading`)
+**Rule:** Under amber readiness, weight advances are suppressed for `isKneeLoading` exercises only. Non-knee-loading exercises (bench press, rows, curls, plank) progress normally during a knee-flare deload.
+**Evidence:** PFP/quadriceps tendinopathy flares affect patellofemoral and peri-patellar tendon tissue specifically. The evidence base's relative-rest model means maintaining load where it is clinically safe while reducing load at the affected joint. There is no clinical basis for suppressing bench press or rows during a knee flare — those exercises produce zero patellofemoral stress. Blanket progression freeze would unnecessarily impair upper-body and systemic training capacity.
+**Why this matters:** If someone changes `isKneeLoading` to `() => true` (affect all exercises) or removes the check, the code will still appear to work, but the clinical protocol will be wrong — upper-body work will silently stall during every knee flare.
+
+### ROM gate (`progression_hold_until_phase`) keys off `rom_stage`, not `current_phase`
+**Rule:** Front squats and single-leg bench squat have `progression_hold_until_phase = 3`, checked against `APP.planState.rom_stage` (not `current_phase`). All weight advances are suppressed until `rom_stage ≥ 3`.
+**Evidence:**
+- Powers et al. (2014): to minimise PFJ stress, squats should be performed from **0° to 45° of knee flexion**. PFJ stress is highest between 60° and 90°.
+- Kernozek et al. (2020): reducing squat depth by ~6° reduced patellofemoral joint forces by **14.4%**.
+- Evidence base protocol: *"gradually deepen to 60° over 4–6 weeks, monitoring 24-hour symptom response."*
+**Why it keys off `rom_stage` not `current_phase`:** ROM advancement is time-gated (28-day minimum per stage) to allow the 4–6 week symptom-response observation window the evidence base prescribes. Phase can advance faster than that. Tying the gate to phase would allow weight advances (at depth) on a timeline that outpaces the symptom-monitoring window. See `.claude/rules/rehab.md` § ROM stage gate for full rationale.
+**Column name note:** `progression_hold_until_phase` is a legacy name predating the ROM/phase decoupling. It now stores the required `rom_stage` integer.
+
+### Deload freeze scoped to knee-loading exercises only (during `in_deload`)
+**Rule:** `deload_freezes_progression` from `plan_config` freezes progression on knee-loading exercises only during a deload. `runStanceProgression` (Plank) has no deload freeze at all.
+**Evidence:** Same rationale as amber suppression — PFP/tendinopathy flare is joint-specific. A knee flare has no clinical basis for freezing upper-body strength progression. The deload model is *relative* rest, not systemic load cessation. See `.claude/rules/rehab.md` § Relative-rest deload.
+
+### Isometric pre-load → immediate analgesia before HSR
+**Rule:** Isometric exercise (5 × 45 s) is performed before the HSR lift rotation. The 2-minute inter-set rest is enforced by the app.
+**Evidence:** Rio et al. (2015) — isometric knee extension at ~60° (5 × 45 s at ~80% MVIC) → immediate analgesia lasting ≥45 min, with cortical inhibition release. Used as a pre-session warm-up: reduces tendinopathy pain before weighted exercises and primes quadriceps activation. See `.claude/rules/rehab.md` § Isometric pre-load for full citation.
+
+### Detraining deload: 14-day trigger
+**Rule:** `checkDetrain` applies a −10% deload to an exercise when >14 days have elapsed since the most recent completed set.
+**Evidence:** **Engineering choice, not a direct evidence-base citation.** General strength-detraining literature (multiple reviews) suggests measurable strength decrements begin at approximately 2–4 weeks of detraining in trained individuals. The 14-day (2-week) trigger is a conservative approximation of the lower bound of that window. The RTF does not give an exact threshold for this; 14 days was chosen to catch long training gaps before they become clinically significant without being overly sensitive to a single missed session. Safe to adjust within the 10–21 day range without re-checking the literature.
+
+### Rep-ladder mode: >20% threshold for mode selection
+**Rule:** `progressionVariant(set3Weight)` returns `'rep_ladder'` when `5 / set3Weight > 0.20` (i.e., a 5 lb increment is >20% of the current weight).
+**Evidence:** **Engineering choice, not evidence-derived.** The >20% heuristic approximates the point at which a 5 lb increment is "too large" to constitute a clean linear progressive overload (a standard loading principle). Below this threshold, 5 lbs is a small enough step that straight classic catch-up is appropriate. Above it, the rep-ladder allows building a larger rep base before advancing weight, reducing injury risk from premature load jumps. Safe to tune.
+
+### Classic catch-up threshold: 25 lbs minimum for auto-progression
+**Rule:** Classic catch-up mode does not auto-advance weights until set3 reaches 25 lbs.
+**Evidence:** **Engineering choice, not evidence-derived.** At very low weights, even a 5 lb increment is a large relative jump, and the rep-ladder should be handling those cases (they will have `5/weight > 0.20` already). The 25 lb threshold is a backstop to prevent edge-case weight values from entering the classic engine prematurely. Safe to tune.

@@ -158,3 +158,53 @@ The two rehab interval blocks in `render()` (`rehabTimerActive` and `rehabRestAc
 - **Green:** full progression, normal loads.
 - **Amber:** knee-loading progression suppressed only (see `.claude/rules/progression.md`).
 - **Red:** regress — apply regression logic before any session.
+
+---
+
+## Clinical rationale ("why" for each major rule)
+
+Rules in this file encode specific clinical decisions. This section ties each to the evidence source so a future agent or engineer knows which rules are evidence-derived vs. engineering choices.
+
+### Relative-rest deload (not full rest)
+**Rule:** Flare → relative rest (cap run, freeze knee-loading progression, suppress plyos, keep isometrics + mobility). NOT full rest.
+**Evidence:** AAFP-published guideline (2020) states: *"relative rest followed by gradual return is the recommended first intervention"* for PFP caused by acute overexertion or rapid training load increase. Injury-prevention programs do not prevent PFP, but reducing activity followed by **graded re-exposure** can be beneficial. Full rest is not recommended; the loading stimulus is therapeutically necessary.
+**Why it matters for the code:** The deload does not zero out all exercises. Non-knee-loading work (bench, rows, curls, plank) continues unchanged. Plyos are suppressed. Isometrics are kept (and substituted when plyos are scheduled) — they have independent analgesic rationale (see Isometric pre-load below).
+
+### ROM stage gate for front squats and single-leg bench squat
+**Rule:** `progression_hold_until_phase` value is checked against `rom_stage` (not `current_phase`). Front squats and single-leg bench squat require `rom_stage = 3` (Full ROM) before weight advances.
+**Evidence:**
+- Powers et al. [2014]: to minimise PFJ stress during weight-bearing exercises, squats should be performed from **0° to 45° of knee flexion**. PFJ stress is highest between 60° and 90°.
+- Kernozek et al. [2020]: reducing squat depth by ~6° reduced patellofemoral joint forces by **14.4%**.
+- Evidence base guidance: *"As symptoms settle, gradually deepen to 60° over 4–6 weeks, monitoring 24-hour symptom response."*
+**Why ROM is decoupled from phase:** The phase cursor advances on clean cycles (run + rehab sessions), which can accumulate faster than a full 28-day ROM stage window. If ROM gating were tied to phase, a patient who banks clean cycles quickly could unlock full-depth front squats before the 4–6 week deepening window has elapsed. The independent 28-day clock (`rom_stage_min_days` from `plan_config`) enforces the symptom-response observation window regardless of how fast phases progress.
+**Column name note:** `progression_hold_until_phase` is a legacy name — it now stores the required `rom_stage` value, not a phase number. The code correctly compares `APP.planState.rom_stage < ex.progression_hold_until_phase`.
+
+### Isometric pre-load exercise (5 × 45 s holds) and 2-minute rest
+**Rule:** Isometric exercise is type `'timed'` with 5 sets × 45 s. The app enforces a **2-minute inter-set rest** (`rehabRestActive`, 120 s). When plyos are suppressed during a deload, the app substitutes the isometric in their place.
+**Evidence (Rio et al., 2015):** Isometric knee extension at ~60° of knee flexion (5 sets × 45 s at ~80% MVIC) produced **immediate analgesia** in patellar tendinopathy — pain reduced from 7.0/10 to 0.17/10 on single-leg decline squat, with effects lasting ≥45 minutes, paralleled by release of cortical inhibition. An in-season RCT confirmed isometric contractions were significantly more analgesic than isotonic contractions over 4 weeks.
+**Pearson et al. (2018):** Short-duration holds (24 × 10 s) are equally effective as long-duration holds (6 × 40 s) when total time under tension is equalised. The 5 × 45 s protocol sits within the evidence-supported range.
+**Why as deload substitute:** When plyos are suppressed (deload + `deload_suppress_plyo`), isometrics replace them because they provide analgesic pre-loading for tendon pain with **zero joint compression** at the depths used during a flare — unlike plyos which involve rapid loading of an already-irritated joint.
+
+### Hip-focused rehab exercises (band walks, step-downs, RDLs)
+**Rule:** The rehab program combines hip-targeted and knee-targeted exercises (band walks with goblet load, lateral step-downs, single-leg RDLs already in the lifting program).
+**Evidence:**
+- Zhang et al. meta-analysis (2025): **hip strengthening > knee strengthening** for both pain reduction (SMD −1.74 vs −1.30) and functional improvement (SMD 1.21 vs 1.02) in PFP.
+- Earl & Hoch (2011): 8-week proximal strengthening program significantly reduced the **knee abduction moment** during running (the key biomechanical variable associated with dynamic valgus), while improving hip abduction and external rotation strength.
+- 2018 International PFP Consensus Statement: recommends the **combination of hip-focused and knee-focused exercises** (not hip-only or knee-only).
+- AAFP guideline: single-leg squats, step-downs, and hip resistance-band exercises with **high-volume protocols** (3 sets × 30+ reps, 3×/week) are most effective.
+**Why weighted band walks (goblet position):** Converting monster walks to weighted goblet-held band walks increases neuromuscular demand and gluteus medius recruitment — the low-load version (body-weight monster walks) failed to produce meaningful biomechanical changes in experienced athletes (consistent with the literature's finding that higher-intensity, task-specific loading is needed).
+
+### Run + rehab cycle-advance gate (not run + lift)
+**Rule:** `maybeWriteCycleDayAdvance()` fires on any day type once `rehab_completed` (and `run_completed` when a run is scheduled) are true. Missing a lift does NOT stall the cycle cursor.
+**Evidence:** The evidence base frames running progression and HSR (heavy slow resistance) as **two independently-dosed therapeutic tracks**, not a single compound intervention:
+- Running progression manages patellofemoral load via volume, cadence, and frequency, with its own symptom-response monitoring criteria (24-hour pain return to baseline).
+- HSR addresses quadriceps tendinopathy and tissue capacity via mechanical loading, with its own frequency prescription (3×/week, specific intensity targets).
+Missing a lift on a given day withholds that session's HSR stimulus but does not negate the therapeutic value of a completed run+rehab day. Stalling the run program because a lift was missed would delay the graded running re-exposure that is central to the treatment. The decoupling reflects clinical reality: a patient on a 12-hour shift can still run+rehab and should be credited for it.
+
+### Cadence target (180 spm) — **displayed, not tracked (gap)**
+**Rule:** `cycle_plan.target_cadence` is populated (180 spm for all run days) and displayed on the run card in the UI as "180 spm target". Actual cadence achieved is NOT logged.
+**Evidence (highest-yield gait intervention):**
+- Bramah et al. (2019): single-session cadence retraining using a metronome produced significant reductions in peak contralateral pelvic drop (3.1°), hip adduction (4.0°), and running pain, maintained at 3 months, with a mean increase in longest pain-free run of **6.8 km**.
+- 2025 systematic review and meta-analysis: increased step rate significantly reduces patellofemoral joint contact force (PFCF) and patellofemoral joint stress (PFJS).
+- Biomechanical modeling: a 10% step-rate increase reduces peak patellofemoral joint force by **~14%**, primarily by decreasing peak stance-phase knee flexion.
+**Gap:** The target is shown but there is no mechanism to log actual cadence achieved, or to flag sessions where cadence was not reached. This is noted in Open Items. A future redesign should consider adding a post-run cadence field to `daily_log`.

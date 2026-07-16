@@ -1386,7 +1386,7 @@ function render() {
         cancelTimerNotification();
         playTimerDone();
         APP.pendingSet = APP.pendingSet + 1;
-        APP.pendingReps = defaultReps(APP.exercises[APP.exIndex]);
+        APP.pendingReps = defaultReps(APP.exercises[APP.exIndex], APP.pendingSet);
         APP.screen = 'log_set';
         render();
       }
@@ -1831,7 +1831,7 @@ function rRehabCard(label, timing, subval, done) {
   var checkBtn = done
     ? '<div style="width:36px;height:36px;border-radius:50%;background:var(--color-text);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-check" style="font-size:18px;color:var(--color-bg)"></i></div>'
     : '<i class="ti ti-chevron-right" style="font-size:18px;color:var(--color-text-tertiary);flex-shrink:0"></i>';
-  return '<div style="background:var(--color-bg);border:0.5px solid var(--color-border);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:10px;cursor:pointer' + (done ? ';opacity:0.65' : '') + '" onclick="goRehab()">'
+  var html = '<div style="background:var(--color-bg);border:0.5px solid var(--color-border);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:' + (done ? '10' : '4') + 'px;cursor:pointer' + (done ? ';opacity:0.65' : '') + '" onclick="goRehab()">'
     + '<div style="display:flex;align-items:center;gap:12px">'
     + '<div style="width:40px;height:40px;border-radius:50%;background:var(--color-bg-warning);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
     + '<i class="ti ti-activity" style="font-size:20px;color:var(--color-text-warning)"></i></div>'
@@ -1842,6 +1842,10 @@ function rRehabCard(label, timing, subval, done) {
     + '</div>'
     + checkBtn
     + '</div></div>';
+  if (!done) {
+    html += '<button onclick="showRehabManualDoneSheet()" style="width:100%;padding:6px;background:transparent;border:none;font-size:12px;color:var(--color-text-tertiary);text-align:right;margin-bottom:6px">Mark done without logging →</button>';
+  }
+  return html;
 }
 
 function rRehab() {
@@ -2005,7 +2009,8 @@ function rRehabCompleteButton(done) {
       + '<button onclick="toggleRehab()" style="margin-left:auto;padding:6px 14px;border-radius:var(--radius-md);background:transparent;border:0.5px solid var(--color-border);font-size:12px;color:var(--color-text-secondary)">Undo</button>'
       + '</div>';
   }
-  return '<button onclick="rehabMarkComplete()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-top:8px">Mark complete</button>';
+  return '<button onclick="rehabMarkComplete()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-top:8px">Mark complete</button>'
+    + '<button onclick="showRehabManualDoneSheet()" style="width:100%;padding:8px;background:transparent;border:none;font-size:13px;color:var(--color-text-tertiary);margin-top:4px">Mark done without logging →</button>';
 }
 
 // =============================================================
@@ -2723,11 +2728,14 @@ function saveWorkoutProgress() {
   }));
 }
 
-function defaultReps(ex) {
-  // Rep-ladder: pre-fill with ceiling (goal+5) so user sees the target they're chasing
+function defaultReps(ex, setIdx) {
   if (ex && !ex.is_bodyweight && ex.progression_type !== 'stance' &&
       progressionVariant(ex.state && ex.state.set3_weight) === 'rep_ladder') {
-    return ex.goal_reps + 5;
+    var progState = ex.state && ex.state.progression_state;
+    // Only set 3 in 'ready' state targets the ceiling (goal+5); all other sets use goal_reps
+    if (progState === 'ready' && setIdx === 2) {
+      return ex.goal_reps + 5;
+    }
   }
   return ex ? ex.goal_reps : 0;
 }
@@ -2735,7 +2743,7 @@ function defaultReps(ex) {
 function goLogSet(setIdx, exIdx) {
   APP.exIndex    = exIdx;
   APP.pendingSet = setIdx;
-  APP.pendingReps = defaultReps(APP.exercises[exIdx]);
+  APP.pendingReps = defaultReps(APP.exercises[exIdx], setIdx);
   APP.screen = 'log_set';
   render();
 }
@@ -2873,7 +2881,7 @@ function skipRest() {
   cancelTimerNotification();
   APP.screen = 'log_set';
   APP.pendingSet = APP.pendingSet + 1;
-  APP.pendingReps = defaultReps(APP.exercises[APP.exIndex]);
+  APP.pendingReps = defaultReps(APP.exercises[APP.exIndex], APP.pendingSet);
   render();
 }
 
@@ -3620,6 +3628,37 @@ async function rehabMarkComplete() {
   render();
 }
 
+function showRehabManualDoneSheet() {
+  var overlay = document.createElement('div');
+  overlay.id = 'rehab-manual-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  overlay.innerHTML = '<div style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px">'
+    + '<p style="font-size:16px;font-weight:500;margin-bottom:8px">Mark rehab done?</p>'
+    + '<p style="font-size:13px;color:var(--color-text-secondary);margin-bottom:20px">Marks rehab complete without set-by-set logging. Use if you did the work but skipped tracking each set.</p>'
+    + '<button onclick="closeRehabManualSheet();rehabMarkDoneManually()" style="width:100%;padding:16px;border-radius:var(--radius-md);background:var(--color-text);color:var(--color-bg);border:none;font-size:15px;font-weight:500;margin-bottom:10px">Yes, mark done</button>'
+    + '<button onclick="closeRehabManualSheet()" style="width:100%;padding:14px;border:none;background:transparent;font-size:14px;color:var(--color-text-secondary)">Cancel</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeRehabManualSheet(); });
+}
+
+function closeRehabManualSheet() {
+  var el = document.getElementById('rehab-manual-overlay');
+  if (el) el.remove();
+}
+
+async function rehabMarkDoneManually() {
+  if (!APP.todayLog) return;
+  var { error } = await db.from('daily_log')
+    .update({ rehab_completed: true })
+    .eq('log_date', APP.today);
+  if (!error) {
+    APP.todayLog.rehab_completed = true;
+    maybeWriteCycleDayAdvance();
+  }
+  render();
+}
+
 async function goCalendar() {
   var now = new Date();
   APP.calViewYear     = now.getFullYear();
@@ -3751,7 +3790,7 @@ document.addEventListener('visibilitychange', function() {
     cancelTimerNotification();
     playTimerDone();
     APP.pendingSet = APP.pendingSet + 1;
-    APP.pendingReps = defaultReps(APP.exercises[APP.exIndex]);
+    APP.pendingReps = defaultReps(APP.exercises[APP.exIndex], APP.pendingSet);
     APP.screen = 'log_set';
     render();
   } else {

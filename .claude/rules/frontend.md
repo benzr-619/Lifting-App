@@ -121,3 +121,77 @@ Next-day heads-up: `APP.crossTrainingHeadsUp` (bool, set in `loadBootData` by qu
 - `lift.sessions` has **`started_at`** (not `created_at`) and `completed_at`. Selecting `created_at` causes a silent 400 from Supabase and returns `[]`.
 - Do **not** chain `.not('completed_at', 'is', null)` with `.gte`/`.lte` on the same column — PostgREST returns 400. The range filters already exclude NULLs.
 - PWA on iOS caches aggressively — service worker may serve stale `index.html` until the next cold launch. Expect a lag between GitHub Pages deploy and the phone reflecting changes.
+
+---
+
+## UI Redesign Guardrails
+
+This section exists so a UI overhaul cannot silently break clinical logic. It separates **load-bearing interactions** (changing their trigger conditions or removing them would break the clinical state machine, even if their visual presentation changes freely) from **cosmetic elements** (safe to restyle with zero clinical risk).
+
+A redesign can change how something looks or how the user reaches it; it cannot remove or defer the underlying function call.
+
+---
+
+### Load-bearing interactions — preserve trigger conditions
+
+**Morning check-in (pain scale + swelling toggle)**
+Call chain: `saveCheckin()` → `saveDailyLog(painLevel, jointFullness)` + `evaluateFlare(painLevel, jointFullness)`
+- The specific pain integer (`knee_pain_level`, 1–5) and swelling boolean (`joint_fullness`) are the direct inputs to the flare/deload/regression state machine. A redesign can use a slider, big buttons, a number pad — anything — but must still capture exactly these two values and pass them to both functions on every submit.
+- `evaluateFlare` must be called on the same submit, not deferred to the next app boot. Splitting check-in into two separate screens (pain today, swelling tomorrow) would break the deload trigger.
+- Wording of pain labels (e.g. "No pain" / "Mild" / "Severe") is safe to change as long as the underlying integer submitted to the DB does not change.
+
+**Run/rehab completion toggles**
+Call chain: `toggleRun()` / `logAlternateActivity(type)` / `toggleRehab()` / `rehabMarkComplete()` → each must call `maybeWriteCycleDayAdvance()` after writing to the DB.
+- `maybeWriteCycleDayAdvance()` is the entire cycle-advance trigger — it writes `lift_cycle_day_pending` to localStorage, which `loadBootData` applies the next morning. If this call is dropped from any of the four entry points, the rehab cycle cursor stalls silently and permanently.
+- Redesigning these as checkboxes, swipe gestures, confirmation dialogs, or different components is safe as long as the underlying function is still called after the DB write.
+- `logAlternateActivity` is the path for alternate-activity logging on *run days* (sets `run_completed = true`). `logCrossTraining` is for *non-run days* (sets `cross_training_completed = true` only). Do NOT swap these paths — `logCrossTraining` does not call `maybeWriteCycleDayAdvance` by design.
+
+**Skip-reason capture (`'niggle'` / `'travel_equipment'` / `'other'`)**
+Call chain: `doSkipSet(reason)` / `skipWholeExercise(idx, reason)` → conditional `markNiggleFlare()`
+- The exact string values are not cosmetic. `'niggle'` is the key that triggers `markNiggleFlare()` (marks cycle dirty, resets ROM clock), subject to the run+lift-day knee-loading exemption (`isRunAndLiftDay() && isKneeLoading(ex)`). `'travel_equipment'` and `'other'` do not call `markNiggleFlare`.
+- A redesign can restyle the skip picker (bottom sheet, inline buttons, icons, different label copy) but must pass these exact string values through to the underlying functions. Renaming `'niggle'` to `'pain'` or `'injury'` without updating the gate check in `doSkipSet` and `skipWholeExercise` would silently break the flare logic.
+
+**"Confirm progression" toggle (`APP.progressionReady`)**
+- All weight advances are gated on `APP.progressionReady = true`, which can only be set by an explicit user action on set 3. The engine does not auto-advance based on rep counts alone.
+- A redesign must NOT merge "log reps" and "confirm progression" into a single action. The opt-in confirmation is a deliberate safety gate — auto-advancing weight based on rep achievement alone would bypass the user's judgment about form quality and readiness.
+- The confirmation button appearing (and its label from `progressionHint()`) is conditional on the progression engine computing a pending advance. Do not hard-code the button to always appear.
+
+**Run-outcome picker (Clean / Flagged)**
+Call chain: `saveRunOutcome('flagged')` → `applyFlareConsequences()` → `refreshReadiness()`
+- A `'flagged'` run must trigger **immediate** flare evaluation, not deferred to the next check-in. `saveRunOutcome` calls `applyFlareConsequences()` directly, which writes the deload/regression patch to `plan_state` in the same session.
+- A redesign can change the picker's appearance (thumbs up/down, emoji, Clean/Flagged buttons, a post-run form) but must preserve this immediate call path. If flagged-run processing is deferred to the next morning's check-in, the deload does not take effect until then — the user could continue loading the knee in the same session.
+- Un-logging a run (`toggleRun()` setting `run_completed = false`) also clears `run_outcome = null` — this pairing must be preserved.
+
+**Long-press state-editor panel (the manual-correction path)**
+Trigger: 600 ms long-press on `#phase-badge` via `badgePressStart` / `badgePressEnd`
+- This is the **only** non-DB manual-correction path into `plan_state`. If a redesign removes or re-routes the long-press, the cursor-editing capability must be preserved somewhere else.
+- The entry mechanism can change (different gesture, hidden developer menu, settings screen behind N taps). But it must remain **intentional and non-accidental** — NOT a plain visible button or inline toggle, because accidental taps would silently mutate the clinical cursor (`current_phase`, `current_cycle_day`, `current_gym_day`).
+- The `stateMarkLiftDone` / `stateMarkLiftNotDone` lift-history toggles and the session re-date/delete functions inside this panel are also the only correction paths for lift history without direct DB access. Preserve them if the panel is redesigned.
+
+**Wake lock / timer screens**
+Control point: `if (aTimerIsRunning()) requestWakeLock(); else releaseWakeLock();` at the end of every `render()`.
+- `aTimerIsRunning()` currently checks `APP.timerActive` (rest timer), `APP.rehabTimerActive` (rehab set timer), and `APP.rehabRestActive` (rehab inter-set rest). If new screens are added that display a countdown (e.g. a warm-up timer, a cool-down screen), `aTimerIsRunning()` must be updated to include those states, or the wake lock will release mid-timer and the chime will silently fail on iOS.
+- The check lives at the end of `render()`, which runs after every state change. Keep it there. Do not move it into individual screen render functions — the centralised check is what guarantees the lock releases correctly even after `skipWholeExercise`, navigation, or an unexpected screen transition.
+
+**Buffer-day and ad-hoc-lift-card visibility conditions**
+Variables: `APP.isBufferDay`, `APP.todayPlan.is_lift_day`
+- `APP.isBufferDay = true` suppresses the run card entirely (prevents logging `run_completed = true` when the cycle cursor is not in a state to process it) and shows the buffer-day lift card instead of the scheduled lift card.
+- `is_lift_day` determines whether the scheduled lift card, the buffer-day card, or the ad-hoc (optional) lift card renders. These are gate conditions, not presentation choices.
+- A redesign can change the visual treatment of each card freely. It must not unify the three card types into a single unconditional component that ignores these flags — the different cards have different underlying call paths (e.g. `startWorkout()` with vs. without the buffer-day context).
+
+---
+
+### Safe to change freely (zero clinical coupling)
+
+The following are purely presentational and carry no risk to the clinical state machine:
+
+- **Color tokens** (`--color-*`) and dark/light theme definitions.
+- **Border radius** (`--radius-*`), card shapes, shadows, borders.
+- **Icons** (Tabler webfont `ti-*` classes) — swap any icon for any other.
+- **Copy / wording** in banners, card labels, and button text — including pain button labels (1–5), as long as the integer submitted does not change.
+- **Animations** — transition durations, loading spinners, entrance/exit effects.
+- **Typography** — font families, sizes, weights, line heights.
+- **Layout and spacing** — card order on the today screen, padding, max-width.
+- **Deload banner and readiness badge** visual treatment — their render *conditions* (`ps.in_deload`, `APP.readiness`) must stay; their visual design (color, icon, placement, copy) is free.
+- **Rest timer display** (the countdown digits, any progress arc, the Skip button placement) — can be fully redesigned as long as the `setInterval` arm/disarm in `render()` and the wake-lock logic at the bottom of `render()` remain intact.
+- **Rehab card layout** on the today screen and the rehab exercise detail screen — freely redesignable; the underlying `toggleRehab()` / `rehabMarkComplete()` call chain must remain.

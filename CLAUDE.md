@@ -39,7 +39,7 @@ Supabase MCP is connected. Use it for migrations, schema inspection, and data qu
 | `sw.js` | Service worker: rest-timer background alerts. Must be served from same root as `index.html`. |
 | `supabase/schema.sql` | Full schema. **Comments are the spec** — read before touching logic. |
 | `supabase/seed.sql` | 15 exercises, 24-day cycle plan, singleton rows. Weight math in comments. |
-| `supabase/migrations/002_run_outcome.sql` | Adds `daily_log.run_outcome`, rebuilds `v_readiness`. **Not yet applied to live DB.** |
+| `supabase/migrations/002_run_outcome.sql` | Adds `daily_log.run_outcome`, rebuilds `v_readiness`. Applied to live DB (column confirmed 2026-07-15). |
 | `Strength_Tracking_Ramping_Sets.xlsx`, `Cycle Through Days.xlsx` | Source of truth for initial weights/plan. Confirm with Ben before regenerating seed. |
 | `NEXT_CHAT_PROMPT.md`, `PLAN_EVALUATION.md` | Design/handoff notes. |
 
@@ -48,8 +48,8 @@ Supabase MCP is connected. Use it for migrations, schema inspection, and data qu
 - **`exercises`** — static config: `gym_day` (1–3), `day_order`, `goal_reps`, increments, rest seconds, `form_cue`, flags (`is_bodyweight`, `is_optional`, `superset_group_id`, `is_superset_anchor`, `progression_hold_until_phase`).
 - **`exercise_state`** — per exercise: `set1/2/3_weight`, `progression_state` enum, `consecutive_failures`.
 - **`sessions`** / **`session_sets`** — per gym visit / per set. `target_reps` snapshotted at log time. A set is `completed` (has `actual_reps`) or `skipped` (has `skip_reason`); CHECK constraint enforces the pairing.
-- **`cycle_plan`** — 24 rows (3 phases × 8 days): run miles, cadence, rehab exercise + timing, `is_lift_day`.
-- **`plan_state`** (singleton) — rehab cursor: `current_phase`, `current_cycle_day` (1–8), `current_gym_day` (1–3), counters, `in_deload`, `deload_started_on`.
+- **`cycle_plan`** — 56 rows (7 phases × 8 days): run miles, `target_cadence`, rehab exercise + timing, `is_lift_day`. Cadence targets (180 spm) are displayed in the UI on run-day cards but actual cadence is not logged — see Open Items.
+- **`plan_state`** (singleton) — rehab cursor: `current_phase`, `current_cycle_day` (1–8), `current_gym_day` (1–3), counters, `in_deload`, `deload_started_on`, `last_cycle_outcome` ('clean'/'neutral'/'dirty'); plus `rom_stage` (1–3: 45°/60°/Full ROM) and `rom_stage_started_on` — **ROM stage is an independent clock**, not tied to phase transitions.
 - **`plan_config`** (singleton) — all tunable thresholds. **Read at runtime — never hard-code.**
 - **`daily_log`** — per calendar day: pain (1–5), `joint_fullness`, run/rehab completion, `run_outcome`.
 - **`v_readiness`** → green/amber/red. **`v_phase_ready`** → boolean.
@@ -62,13 +62,13 @@ Read `.claude/rules/progression.md` when working on the progression engine, ambe
 Read `.claude/rules/rehab.md` when working on the rehab cursor, flare handling, or readiness gate.
 Read `.claude/rules/frontend.md` when working on JS conventions, render model, timers, or styling.
 
-**Progression engine** (`runProgressionEngine`, `progressionVariant`, `classicTargets`, `repFloor`): two modes (rep-ladder vs classic catch-up); catch-up advances set3→set2→set1; 5 lb increments only; opt-in via user confirmation; stall/deload automatic.
+**Progression engine** (`runProgressionEngine`, `progressionVariant`, `classicTargets`, `repFloor`): two modes (rep-ladder vs classic catch-up); catch-up advances set3→set2→set1; 5 lb increments only; opt-in via user confirmation; stall/deload automatic. Deload freeze applies to **knee-loading exercises only** (`isKneeLoading`), not blanket. ROM depth gate (`progression_hold_until_phase`) keys off `rom_stage`, not `current_phase` — front squats and single-leg bench squat require `rom_stage = 3` (Full ROM), independent of phase advance.
 
-**Rehab cursor** (`advanceCycleDay`): one cycle-day per completed rehab+run session (not per lift, not per calendar day). `current_cycle_day` advances once `run_completed` + `rehab_completed` are both true (or just `rehab_completed` when no run is scheduled). `current_gym_day` advances only on lift completion, independently. On day-8 roll, evaluates cycle for cleanliness; clean cycles bank toward phase advance.
+**Rehab cursor** (`advanceCycleDay`): **fully decoupled from lift completion** — one cycle-day per completed rehab+run session. Deferred via `lift_cycle_day_pending`; applied next morning independently of `lift_gym_day_pending`. `current_gym_day` advances only on actual lift completion. Day-8 roll: dirty/neutral/clean three-state evaluation; clean cycles bank toward phase advance (up to phase 7).
 
-**Flare + deload** (`evaluateFlare`, `markNiggleFlare`): flare = pain ≥ threshold, swelling, niggle-skip, or flagged run. 1st flare → relative rest deload. 2nd flare before a clean cycle → regress one phase.
+**Flare + deload** (`evaluateFlare`, `applyFlareConsequences`): *full flare* = pain ≥ threshold, swelling, or `run_outcome = 'flagged'` → 1st flare triggers relative-rest deload (freeze knee-loading progression, cap run, suppress plyos; non-knee-loading work continues). 2nd flare before a clean cycle → regress one phase. *Niggle-skip* (`markNiggleFlare`) marks cycle dirty only — does NOT trigger deload or regression.
 
-**Readiness gate**: green = go; amber = knee-loading exercises held flat only; red = regress.
+**Readiness gate**: green = full progression; amber = knee-loading exercises held flat, non-knee-loading exercises progress normally; red = regress.
 
 ## Invariants (never change without confirmation)
 
@@ -91,4 +91,5 @@ Read `.claude/rules/frontend.md` when working on JS conventions, render model, t
 
 - **RLS** — anon key is public; verify policies before multi-user exposure.
 - **Coach UX** on daily check-in is undesigned. Keep rules-based (no LLM) unless decided otherwise.
+- **Cadence tracking gap** — `target_cadence` (180 spm) is stored in `cycle_plan` and displayed on the run card as advisory info, but actual cadence achieved is not logged anywhere. Evidence base rates cadence retraining as the single highest-yield gait intervention (Bramah et al., 2025 meta-analysis). Consider adding a post-run cadence log field.
 - Deferred: LM Studio + Qwen for AI analysis.
