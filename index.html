@@ -3047,11 +3047,40 @@ async function saveCalEdit() {
     };
     var res = await db.from('daily_log').upsert(payload, { onConflict: 'user_id,log_date' });
     if (res.error) throw res.error;
+
+    // Compute yesterday in local time (same pattern as loadBootData)
+    var ydDate = new Date(APP.today + 'T00:00:00');
+    ydDate.setDate(ydDate.getDate() - 1);
+    var yesterdayStr = ydDate.getFullYear() + '-'
+      + String(ydDate.getMonth() + 1).padStart(2, '0') + '-'
+      + String(ydDate.getDate()).padStart(2, '0');
+
+    // If we just completed yesterday's run+rehab gate retroactively, trigger the
+    // cycle-day advance that should have fired this morning but couldn't because
+    // the run wasn't logged yet. Write the pending (mirroring maybeWriteCycleDayAdvance)
+    // then let loadBootData apply it exactly as it would on a normal next-day boot.
+    var needsAdvance = CAL_EDIT_DATE === yesterdayStr
+      && d.rehab_completed
+      && d.run_completed;
+    if (needsAdvance) {
+      localStorage.setItem('lift_cycle_day_pending', JSON.stringify({ date: yesterdayStr }));
+    }
+
     closeCalEditPanel();
-    APP.calLoading = true;
-    render();
-    await loadCalendarData(APP.calViewYear, APP.calViewMonth);
-    APP.calLoading = false;
+
+    if (needsAdvance) {
+      // Full state reload — loadBootData will see the pending date < today and fire advanceCycleDay.
+      APP.calLoading = true;
+      render();
+      await loadBootData();
+      await loadCalendarData(APP.calViewYear, APP.calViewMonth);
+      APP.calLoading = false;
+    } else {
+      APP.calLoading = true;
+      render();
+      await loadCalendarData(APP.calViewYear, APP.calViewMonth);
+      APP.calLoading = false;
+    }
     render();
   } catch(e) {
     console.error('Cal edit save error:', e);
