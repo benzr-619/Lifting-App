@@ -2087,9 +2087,12 @@ function rCalendar() {
     var bc  = isSel ? 'var(--color-text)' : isToday ? 'var(--color-text-info)' : 'var(--color-border)';
     var opa = isFuture ? 'opacity:0.35;' : '';
     var clickable = !isFuture && (log || hasLift);
-    var onclick = clickable ? 'onclick="calSelectDate(\'' + dateStr + '\')"' : '';
+    var isPast = !isFuture;
+    var cellHandlers = '';
+    if (clickable) cellHandlers += 'onclick="calSelectDate(\'' + dateStr + '\')" ';
+    if (isPast) cellHandlers += 'ontouchstart="calPressStart(\'' + dateStr + '\',event)" ontouchend="calPressEnd()" ontouchmove="calPressEnd()" onmousedown="calPressStart(\'' + dateStr + '\',event)" onmouseup="calPressEnd()" onmouseleave="calPressEnd()" oncontextmenu="return false"';
 
-    html += '<div ' + onclick + ' style="' + opa + 'background:' + cellBg + ';border:' + bw + ' solid ' + bc + ';border-radius:var(--radius-md);padding:5px 3px 6px;min-height:52px;display:flex;flex-direction:column;align-items:center;' + (clickable ? 'cursor:pointer' : '') + '">'
+    html += '<div ' + cellHandlers + ' style="' + opa + 'background:' + cellBg + ';border:' + bw + ' solid ' + bc + ';border-radius:var(--radius-md);padding:5px 3px 6px;min-height:52px;display:flex;flex-direction:column;align-items:center;' + (isPast ? 'cursor:pointer;' : '') + '">'
       + '<span style="font-size:12px;font-weight:' + (isToday ? '700' : '400') + ';color:' + (isToday ? 'var(--color-text-info)' : 'var(--color-text)') + '">' + d + '</span>';
 
     if (!isFuture && (hasLift || hasRun || hasRehab)) {
@@ -2137,7 +2140,10 @@ function rCalDayDetail(dateStr, log, sessions) {
   var label = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
   var html = '<div style="margin-top:14px;padding:14px;background:var(--color-bg-secondary);border-radius:var(--radius-lg)">'
-    + '<p style="font-size:13px;font-weight:500;margin-bottom:10px">' + label + '</p>';
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+    + '<p style="font-size:13px;font-weight:500">' + label + '</p>'
+    + '<button onclick="showCalEditPanel(\'' + dateStr + '\')" style="background:transparent;border:none;padding:4px;color:var(--color-text-tertiary);font-size:16px;display:flex;cursor:pointer" title="Edit this day"><i class="ti ti-pencil"></i></button>'
+    + '</div>';
 
   if (log) {
     var pc = log.knee_pain_level >= 4 ? 'var(--color-text-danger)'
@@ -2911,6 +2917,147 @@ function closeSkipMenu() {
 var BADGE_PRESS_TIMER = null;
 var STATE_DRAFT = null;     // working copy of the cursor while editing
 var STATE_SESSIONS = [];    // recent sessions loaded for the panel
+
+// Calendar day editor
+var CAL_PRESS_TIMER     = null;
+var CAL_PRESS_DATE      = null;
+var CAL_LONG_PRESS_FIRED = false;
+var CAL_EDIT_DATE       = null;
+var CAL_EDIT_DRAFT      = null;
+
+function calPressStart(dateStr, ev) {
+  if (dateStr >= APP.today) return; // no editing today or future
+  CAL_PRESS_DATE = dateStr;
+  CAL_LONG_PRESS_FIRED = false;
+  clearTimeout(CAL_PRESS_TIMER);
+  CAL_PRESS_TIMER = setTimeout(function() {
+    CAL_LONG_PRESS_FIRED = true;
+    showCalEditPanel(dateStr);
+  }, 600);
+}
+
+function calPressEnd() {
+  clearTimeout(CAL_PRESS_TIMER);
+  CAL_PRESS_TIMER = null;
+}
+
+function showCalEditPanel(dateStr) {
+  var logMap = {};
+  APP.calLogs.forEach(function(l) { logMap[l.log_date] = l; });
+  var existing = logMap[dateStr] || null;
+  CAL_EDIT_DATE = dateStr;
+  CAL_EDIT_DRAFT = {
+    run_completed:   existing ? !!existing.run_completed   : false,
+    rehab_completed: existing ? !!existing.rehab_completed : false,
+    knee_pain_level: existing ? existing.knee_pain_level   : null,
+    joint_fullness:  existing ? !!existing.joint_fullness  : false
+  };
+  var overlay = document.createElement('div');
+  overlay.id = 'cal-edit-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-end;justify-content:center;z-index:100';
+  overlay.innerHTML = '<div id="cal-edit-sheet" style="background:var(--color-bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:20px;width:100%;max-width:430px;max-height:85vh;overflow-y:auto">' + calEditSheetBody() + '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closeCalEditPanel(); });
+}
+
+function closeCalEditPanel() {
+  var el = document.getElementById('cal-edit-overlay');
+  if (el) el.remove();
+  CAL_EDIT_DATE = null;
+  CAL_EDIT_DRAFT = null;
+}
+
+function refreshCalEditSheet() {
+  var el = document.getElementById('cal-edit-sheet');
+  if (el) el.innerHTML = calEditSheetBody();
+}
+
+function calEditSheetBody() {
+  var d = CAL_EDIT_DRAFT;
+  var dateObj = new Date(CAL_EDIT_DATE + 'T12:00:00');
+  var label = dateObj.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+  var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+    + '<p style="font-size:16px;font-weight:500">Edit day</p>'
+    + '<button onclick="closeCalEditPanel()" style="background:transparent;border:none;color:var(--color-text-tertiary);font-size:20px;padding:4px;display:flex"><i class="ti ti-x"></i></button>'
+    + '</div>'
+    + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:18px">' + label + '</p>';
+
+  html += calEditToggleRow('Run completed', 'run_completed', d.run_completed, 'ti-run', 'var(--color-text-info)');
+  html += calEditToggleRow('Rehab completed', 'rehab_completed', d.rehab_completed, 'ti-activity', 'var(--color-text-warning)');
+
+  html += '<p style="font-size:13px;font-weight:500;margin-top:16px;margin-bottom:10px">Pain level</p>'
+    + '<div style="display:flex;gap:6px;margin-bottom:4px">';
+  for (var n = 1; n <= 5; n++) {
+    var sel = d.knee_pain_level === n;
+    html += '<button onclick="calEditSetPain(' + n + ')" style="flex:1;padding:12px 4px;border:0.5px solid '
+      + (sel ? 'var(--color-text)' : 'var(--color-border-md)') + ';border-radius:var(--radius-md);font-size:15px;font-weight:'
+      + (sel ? '600' : '400') + ';background:' + (sel ? 'var(--color-bg-tertiary)' : 'var(--color-bg)') + ';color:var(--color-text)">' + n + '</button>';
+  }
+  var noneSel = d.knee_pain_level === null;
+  html += '<button onclick="calEditSetPain(null)" style="flex:1;padding:12px 4px;border:0.5px solid '
+    + (noneSel ? 'var(--color-text)' : 'var(--color-border-md)') + ';border-radius:var(--radius-md);font-size:13px;font-weight:'
+    + (noneSel ? '600' : '400') + ';background:' + (noneSel ? 'var(--color-bg-tertiary)' : 'var(--color-bg)') + ';color:var(--color-text-secondary)">—</button>';
+  html += '</div>'
+    + '<p style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:14px">— = no check-in logged</p>';
+
+  html += calEditToggleRow('Swelling / joint fullness', 'joint_fullness', d.joint_fullness, 'ti-droplet', 'var(--color-text-danger)');
+
+  html += '<button onclick="saveCalEdit()" id="cal-edit-save-btn" style="width:100%;padding:14px;margin-top:20px;border:none;border-radius:var(--radius-md);font-size:15px;font-weight:500;background:var(--color-text);color:var(--color-bg)">Save</button>';
+
+  return html;
+}
+
+function calEditToggleRow(label, field, val, icon, color) {
+  return '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:0.5px solid var(--color-border)">'
+    + '<div style="display:flex;align-items:center;gap:8px">'
+    + '<i class="ti ' + icon + '" style="font-size:16px;color:' + color + ';flex-shrink:0"></i>'
+    + '<span style="font-size:14px">' + label + '</span>'
+    + '</div>'
+    + '<button onclick="calEditToggle(\'' + field + '\')" style="width:48px;height:28px;border-radius:14px;border:none;background:'
+    + (val ? 'var(--color-text-success)' : 'var(--color-bg-tertiary)') + ';position:relative;cursor:pointer">'
+    + '<span style="position:absolute;top:3px;' + (val ? 'right:3px' : 'left:3px') + ';width:22px;height:22px;background:white;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,0.3)"></span>'
+    + '</button>'
+    + '</div>';
+}
+
+function calEditToggle(field) {
+  CAL_EDIT_DRAFT[field] = !CAL_EDIT_DRAFT[field];
+  refreshCalEditSheet();
+}
+
+function calEditSetPain(n) {
+  CAL_EDIT_DRAFT.knee_pain_level = n;
+  refreshCalEditSheet();
+}
+
+async function saveCalEdit() {
+  if (!CAL_EDIT_DATE || !CAL_EDIT_DRAFT) return;
+  var btn = document.getElementById('cal-edit-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    var d = CAL_EDIT_DRAFT;
+    var payload = {
+      user_id:         APP.userId,
+      log_date:        CAL_EDIT_DATE,
+      run_completed:   d.run_completed,
+      rehab_completed: d.rehab_completed,
+      knee_pain_level: d.knee_pain_level,
+      joint_fullness:  d.joint_fullness
+    };
+    var res = await db.from('daily_log').upsert(payload, { onConflict: 'user_id,log_date' });
+    if (res.error) throw res.error;
+    closeCalEditPanel();
+    APP.calLoading = true;
+    render();
+    await loadCalendarData(APP.calViewYear, APP.calViewMonth);
+    APP.calLoading = false;
+    render();
+  } catch(e) {
+    console.error('Cal edit save error:', e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+  }
+}
 
 function badgePressStart(ev) {
   // Don't let the long-press also trigger text selection / context menu
@@ -3696,6 +3843,7 @@ async function calNav(dir) {
 }
 
 function calSelectDate(dateStr) {
+  if (CAL_LONG_PRESS_FIRED) { CAL_LONG_PRESS_FIRED = false; return; }
   APP.calSelectedDate = APP.calSelectedDate === dateStr ? null : dateStr;
   render();
 }
