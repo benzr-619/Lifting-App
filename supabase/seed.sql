@@ -175,12 +175,14 @@ VALUES
   ('a2000002-0000-0000-0000-000000000000', 45, 50, 55, 'ready'),
 
   -- Lateral raise: 10/10/15
-  --   5/15 = 33% > 20% → rep ladder → ready
-  ('a2000003-0000-0000-0000-000000000000', 10, 10, 15, 'ready'),
+  --   5/15 = 33% > 20% → rep ladder. classicTargets(15): t_s2=15, t_s1=15.
+  --   s2=10 < 15 → catch_up_set2 (not 'ready' — set2 lags the target for this weight)
+  ('a2000003-0000-0000-0000-000000000000', 10, 10, 15, 'catch_up_set2'),
 
   -- Curl: 10/10/15
-  --   5/15 = 33% > 20% → rep ladder → ready
-  ('a2000004-0000-0000-0000-000000000000', 10, 10, 15, 'ready'),
+  --   5/15 = 33% > 20% → rep ladder. classicTargets(15): t_s2=15, t_s1=15.
+  --   s2=10 < 15 → catch_up_set2
+  ('a2000004-0000-0000-0000-000000000000', 10, 10, 15, 'catch_up_set2'),
 
   -- Plank with shoulder taps: bodyweight
   ('a2000005-0000-0000-0000-000000000000', NULL, NULL, NULL, 'ready'),

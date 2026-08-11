@@ -134,8 +134,8 @@ Read from `plan_config` at runtime. Automatically updated by `PHASE_DELOAD_RUN_C
 
 The `updatePlanConfig(patch)` function handles DB writes and keeps `APP.planConfig` in sync. No manual intervention needed.
 
-## Weighted rehab rest timer (band walks)
-Band walk (`type: 'weighted'`) has `rest_short_seconds: 60` and `rest_long_seconds: 180` in `REHAB_EXERCISES`. `rehabLogSet()` checks for `ex.rest_short_seconds` and starts `APP.rehabRestActive` between sets (60s after set 1, 180s after set 2). The weighted block in `rRehab` renders the rest countdown when `rehabRestActive` is true — identical display to the timed rest screen. `rehabSkipRest()` works for both.
+## Weighted rehab rest timer (band walks, step-downs, sl squat box)
+Weighted exercises (`type: 'weighted'`) all have `rest_short_seconds: 60` and `rest_long_seconds: 180` in `REHAB_EXERCISES`. `rehabLogSet()` checks for `ex.rest_short_seconds` and starts `APP.rehabRestActive` between sets (60s after set 1, 180s after set 2). The weighted block in `rRehab` renders the rest countdown when `rehabRestActive` is true — identical display to the timed rest screen. `rehabSkipRest()` works for all types.
 
 ## Timed rehab rest timer
 Timed exercises (type: `timed`, e.g. Spanish squat isometric) have a **2-minute rest between sets** enforced by the app.
@@ -145,11 +145,39 @@ State fields on `APP`:
 - `rehabRestEndTime` (ms) — absolute `Date.now()` anchor; remaining time recomputed each tick to survive background throttle
 - `rehabRestRemaining` (seconds) — display value
 
-Flow: set timer hits 0 → mark set complete → if more sets remain, set `rehabRestActive = true`, `rehabRestEndTime = Date.now() + 120000`, call `scheduleTimerNotification` → rest interval runs in `render()` → on expiry: advance `rehabActiveSet`, reset `rehabTimerRemaining`, beep, render.
+Flow: set timer hits 0 → mark set complete → if more sets remain, set `rehabRestActive = true`, `rehabRestEndTime = countdownEndTime(120)`, call `scheduleTimerNotification` → rest interval runs in `render()` → on expiry: advance `rehabActiveSet`, reset `rehabTimerRemaining`, beep, render.
 
-`rehabSkipRest()` cancels the notification, clears the interval, and drops immediately to the next set timer. `rehabTimerSkip()` also clears rest state in case it is called mid-rest. `goRehab()` recalculates `rehabRestRemaining` from `rehabRestEndTime` on re-entry so navigating away mid-rest doesn't reset the clock.
+`rehabSkipRest()` cancels the notification, clears the interval, and drops immediately to the next set timer. `rehabTimerSkip()` also clears rest state in case it is called mid-rest. `goRehab()` recalculates `rehabRestRemaining` from `rehabRestEndTime` on re-entry so navigating away mid-rest doesn't reset the clock — this recompute now runs unconditionally for every exercise type that uses `rehabRestActive` (`timed`, `weighted`, `reps_no_weight`), not just `timed`.
 
 The two rehab interval blocks in `render()` (`rehabTimerActive` and `rehabRestActive`) are mutually exclusive — `render()` always clears `APP.timerInterval` before arming a new one, so only one runs at a time.
+
+### Absolute-anchor countdown unification (`countdownEndTime`/`countdownRemaining`)
+The lift's rest timer (`APP.timerActive`/`timerEndTime`/`timerRemaining`) and the rehab inter-set rest timer (`APP.rehabRestActive`/`rehabRestEndTime`/`rehabRestRemaining`) previously computed their `Date.now()`-anchored start/tick math independently — two near-identical blocks of code that could drift apart under future edits. Both now call the same two shared helpers (defined near `fmt()`):
+- `countdownEndTime(durationSeconds)` → `Date.now() + durationSeconds * 1000`
+- `countdownRemaining(endTime)` → `Math.max(0, Math.round((endTime - Date.now()) / 1000))`
+
+They deliberately remain **separate state slots**, not one shared variable — a rehab rest can be left running in the background (`goRehab()`'s resume-recompute above) while the user navigates to a lift set and starts the lift's own rest timer, so the two must be able to run concurrently without clobbering each other. What's unified is the tick/anchor arithmetic, not the storage. The isometric hold countdown (`rehabTimerActive`/`rehabTimerRemaining`) is a plain decrementing counter, not anchor-based, and is unaffected by this — it's a genuinely different kind of timer (a fixed-duration hold, not a rest-between-sets clock) and was out of scope for the unification.
+
+## Rehab progression (weighted exercises — band_walk, step_down, sl_squat_box)
+Weighted rehab exercises get the same reps-entry + confirm-progression treatment as the lift, but progression math and persistence are entirely separate from the lift's DB-backed system — **by deliberate design, not oversight**. Rehab loading must continue through a lift-side deload (`in_deload`), so rehab progression is NOT gated by `isKneeLoading`, the amber/red readiness gate, or `deload_freezes_progression`. See `.claude/rules/progression.md` for the shared math (`computeProgressionStep`, `classicTargets`, `repFloor`, `repCeiling`) both engines call.
+
+### Rep entry
+`rRehab()`'s weighted block shows an inline reps stepper (`rrn` element, `rehabRepsAdj(±1)`), pre-filled to `ex.reps` (the exercise's target) for the set about to be logged — no separate log-set screen, consistent with rehab's existing single-card flow. `rehabLogSet()` records whatever the stepper shows into `APP.rehabLoggedReps[setIdx]`, marks the set complete, and either starts the inter-set rest or (on the last set) calls `finishRehabExercise(ex)`.
+
+### Confirm-progression gate
+Mirrors the lift's `APP.progressionReady`/`toggleProgressionReady()`: `APP.rehabProgressionReady`/`toggleRehabProgressionReady()`. The confirm button only renders on the **last set** of the round (`completedCount === ex.sets - 1`), showing `rehabProgressionHint(ex, progress)`. Weight never auto-advances off rep counts alone — `finishRehabExercise` reads `APP.rehabProgressionReady` and passes it through as `progressionConfirmed` to `runRehabProgressionStep`.
+
+### Single-shared-weight adaptation (`runRehabProgressionStep`)
+Rehab exercises use **one weight for all sets** (the existing weight adjuster — no per-set set1/set2/set3 weight like the lift). This means there is nothing to "catch up" between sets, so `runRehabProgressionStep` feeds `s1w = s2w = s3w = progress.weight` and `progressionState: 'ready'` into `computeProgressionStep` on every call, and the returned `progressionState` is discarded — rehab **never persists** `catch_up_set2`/`catch_up_set1` (that's a lift-only concept, meaningless with a single weight). Practical effect: the evaluated set is always the last set of the round; classic-mode exercises (heavier weight, `5/weight ≤ 20%`) advance weight on any goal-reps success; rep-ladder-mode exercises (lighter weight, e.g. sl_squat_box at 10 lbs) require hitting the ceiling (`goalReps + 5`) first. The 2-consecutive-under-floor stall/deload (-10%, rounded to nearest 5) is identical to the lift's.
+
+### Persistence (`loadRehabProgress`/`saveRehabProgress`)
+Device-local, via the exercise's existing `weightKey` localStorage entry (the same key already used pre-progression for the plain weight number — now carries more state as JSON): `{ weight, consecutiveFailures, lastReps }`. `lastReps` is the reps logged per set on the most recently completed round (e.g. `[10, 10, 8]`), shown as a "Last round: …" line under the weight adjuster. `loadRehabProgress` migrates a legacy plain-number value transparently (pre-progression installs). **This history is device-local and does not survive a reinstall**, unlike the lift's DB-backed `exercise_state` — an accepted tradeoff of keeping rehab decoupled from the lift schema, not a bug.
+
+## Plyo — reps-only, no weight (`type: 'reps_no_weight'`)
+Plyo gets set-completion tracking and the same inter-set rest timer as weighted exercises (`rest_short_seconds: 60` / `rest_long_seconds: 180`), but **no weight tracking and no progression** — deliberately excluded per the isometric-preload/deload clinical rules on loaded plyometrics (rapid loading of an already-irritated joint has no analgesic upside the way isometrics do; see Clinical rationale below). `rehabLogPlainSet()` just marks the set complete and starts rest — no reps entry, no confirm gate, no localStorage state. `rRehab()`'s `reps_no_weight` branch renders set-completion chips + the shared rest-timer UI, structurally identical to the weighted block's chips but without the weight adjuster or stepper.
+
+## sl_squat_box — no lock/unlock gate (deliberate, per-user decision)
+`sl_squat_box` was converted from `type: 'free'` to `type: 'weighted'` (defaultWeight 10, increment 5) on 2026-08-09, given the same progression treatment as band_walk/step_down. **No unlock mechanism was built** — a lock/unlock gate (weight held at 0 until an explicit unlock action, mirroring the long-press state-panel pattern) was considered and explicitly rejected by Ben: he had already established reliable unweighted valgus control at the time of the change, so the exercise starts loaded at 10 lbs with no gate. If a future regression or phase reset means valgus control needs to be re-verified before loading resumes, that would need a new, explicitly-requested mechanism — none exists today.
 
 ## Readiness gate
 `v_readiness` returns green / amber / red from the latest check-in.

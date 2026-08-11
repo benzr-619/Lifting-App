@@ -236,6 +236,12 @@ var APP = {
   rehabRestEndTime:   null,
   rehabRestRemaining: 120,
 
+  // Rehab progression (weighted rehab exercises — band_walk, step_down, sl_squat_box)
+  rehabPendingReps:      0,     // reps stepper value for the set about to be logged
+  rehabLoggedReps:       [],    // reps actually logged per set this round, index 0 = set1
+  rehabProgressionReady: false, // mirrors APP.progressionReady — explicit confirm gate
+  rehabProgress:         null,  // {weight, progressionState, consecutiveFailures, lastReps} — see loadRehabProgress
+
   // Structural test windows — loaded on boot, used in cycle evaluation and inline warnings
   structuralWindows: [],
 
@@ -721,6 +727,132 @@ function repFloor(goalReps) {
   return Math.ceil(goalReps * 0.8);
 }
 
+// Rep-ladder ceiling (goal + 5) — hitting this on the evaluated set advances weight
+// instead of just holding 'ready'.
+function repCeiling(goalReps) {
+  return goalReps + 5;
+}
+
+// Pure, storage-agnostic progression step calculator shared by the lift progression
+// engine (exercise_state DB rows, via runProgressionEngine) and the rehab progression
+// engine (localStorage records, via runRehabProgressionStep). Neither this function nor
+// classicTargets/repFloor/repCeiling touch a database or localStorage — callers own
+// persistence; this only computes the next state from plain inputs, so the catch-up/
+// stall math can't drift between the two callers.
+//
+// state: { s1w, s2w, s3w, progressionState ('ready'|'catch_up_set2'|'catch_up_set1'),
+//          consecutiveFailures }
+// setsData: [{reps, skipped}, ...] one entry per set, index 0 = set1
+// opts: { goalReps, variant ('rep_ladder'|'classic'), progressionConfirmed,
+//         holdOnSuccess (optional) — when true, a success+confirmed evaluation is a
+//         total no-op (no patch at all). Used by the lift's amber-knee-loading gate;
+//         rehab never sets this since it has no readiness-gate concept (by design —
+//         see rehab.md).
+//       }
+//
+// Returns a patch object with only the changed keys (subset of state's shape), or {}
+// if nothing changes (skip present, incomplete reps, or no-confirm/no-advance case).
+function computeProgressionStep(state, setsData, opts) {
+  var s1w = state.s1w, s2w = state.s2w, s3w = state.s3w;
+  var progState = state.progressionState;
+  var failures = state.consecutiveFailures || 0;
+  var goalReps = opts.goalReps;
+  var variant = opts.variant;
+  var floor = repFloor(goalReps);
+  var ceiling = repCeiling(goalReps);
+
+  var hasSkip = setsData.some(function(s) { return s.skipped; });
+  if (hasSkip) return {};
+
+  var reps = setsData.map(function(s) { return s.reps; });
+  if (reps.some(function(r) { return r == null; })) return {};
+
+  var patch = {};
+
+  // Rep-ladder catch-up correction: 'ready' is only valid once set1/set2 have already
+  // reached their classicTargets for the current set3 weight. If they lag (e.g. a
+  // freshly-seeded exercise with set1/set2 below set3), treat this as needing catch-up
+  // rather than requiring a fresh ceiling-rep hit on set3.
+  if (variant === 'rep_ladder' && progState === 'ready') {
+    var catchTargets = classicTargets(s3w);
+    if (s2w < catchTargets.target_s2) {
+      progState = 'catch_up_set2';
+      patch.progressionState = 'catch_up_set2';
+    } else if (s1w < catchTargets.target_s1) {
+      progState = 'catch_up_set1';
+      patch.progressionState = 'catch_up_set1';
+    }
+  }
+
+  // Which set are we evaluating for success?
+  // 'ready'         → check set3 reps
+  // 'catch_up_set2' → check set2 reps
+  // 'catch_up_set1' → check set1 reps
+  var evalSetIdx = (progState === 'ready') ? 2 : (progState === 'catch_up_set2') ? 1 : 0;
+  var evalReps = reps[evalSetIdx];
+  var success = evalReps >= goalReps;
+  var underFloor = evalReps < floor;
+
+  if (underFloor) {
+    // Count consecutive failures — stall on 2nd
+    failures += 1;
+    patch.consecutiveFailures = failures;
+    if (failures >= 2) {
+      // Deload: set3 -10%, round to nearest 5
+      var newS3 = Math.round((s3w * 0.9) / 5) * 5;
+      var deloadedTargets = classicTargets(newS3);
+      patch.s3w = newS3;
+      patch.progressionState = 'catch_up_set2';
+      patch.s2w = Math.min(s2w, deloadedTargets.target_s2);
+      patch.s1w = Math.min(s1w, deloadedTargets.target_s1);
+      patch.consecutiveFailures = 0;
+    }
+  } else if (success && opts.progressionConfirmed) {
+    if (opts.holdOnSuccess) return {}; // hold flat this evaluation; don't touch state
+    patch.consecutiveFailures = 0;
+
+    if (variant === 'rep_ladder' && progState === 'ready') {
+      if (evalReps >= ceiling) {
+        patch.s3w = s3w + 5;
+        patch.progressionState = 'catch_up_set2';
+      } else {
+        patch.progressionState = 'ready';
+      }
+    } else {
+      // Classic catch-up state machine (also handles rep_ladder catch_up states)
+      if (progState === 'ready') {
+        patch.s3w = s3w + 5;
+        patch.progressionState = 'catch_up_set2';
+      } else if (progState === 'catch_up_set2') {
+        var targets2 = classicTargets(s3w);
+        if (s2w < targets2.target_s2) {
+          patch.s2w = Math.min(s2w + 5, targets2.target_s2);
+          if (patch.s2w >= targets2.target_s2) {
+            patch.progressionState = (s1w >= targets2.target_s1) ? 'ready' : 'catch_up_set1';
+          }
+        } else {
+          patch.progressionState = (s1w >= targets2.target_s1) ? 'ready' : 'catch_up_set1';
+        }
+      } else if (progState === 'catch_up_set1') {
+        var targets1 = classicTargets(s3w);
+        if (s1w < targets1.target_s1) {
+          patch.s1w = Math.min(s1w + 5, targets1.target_s1);
+          if (patch.s1w >= targets1.target_s1) {
+            patch.progressionState = 'ready';
+          }
+        } else {
+          patch.progressionState = 'ready';
+        }
+      }
+    }
+  } else {
+    // Between floor and goal — partial. Reset failure counter (not a stall).
+    patch.consecutiveFailures = 0;
+  }
+
+  return patch;
+}
+
 // Exercises where the knee is the primary load-bearing joint.
 // Under amber readiness, weight advances are suppressed for these only.
 var KNEE_LOADING_EXERCISES = [
@@ -788,115 +920,40 @@ async function runProgressionEngine(ex, setsData) {
   if (APP.planConfig.deload_freezes_progression && APP.planState.in_deload && isKneeLoading(ex)) return;
 
   // Amber readiness: suppress weight advances for knee-loading exercises only.
-  // Stall counting still runs so the failure streak isn't lost.
+  // Stall counting still runs so the failure streak isn't lost — passed through to the
+  // shared step function as holdOnSuccess, which is a lift-only concept (rehab never
+  // sets it — see rehab.md).
   var amberKneeHold = APP.readiness === 'amber' && isKneeLoading(ex);
 
   var state = ex.state;
   var goalReps = ex.goal_reps;
-  var floor = repFloor(goalReps);
-  var ceiling = goalReps + 5;
-
-  // Any skipped set = don't advance, don't count as stall
-  var hasSkip = setsData.some(function(s) { return s.skipped; });
-  if (hasSkip) return;
-  // User must confirm they're ready to progress before any weight advance
+  var variant = progressionVariant(state.set3_weight);
   var progressionConfirmed = setsData.some(function(s) { return s.progressionReady; });
 
-  // All reps must be actual (no nulls)
-  var reps = setsData.map(function(s) { return s.reps; });
-  if (reps.some(function(r) { return r == null; })) return;
+  var stepState = {
+    s1w: state.set1_weight, s2w: state.set2_weight, s3w: state.set3_weight,
+    progressionState: state.progression_state,
+    consecutiveFailures: state.consecutive_failures || 0
+  };
 
-  var s1w = state.set1_weight, s2w = state.set2_weight, s3w = state.set3_weight;
-  var progState = state.progression_state;
-  var failures  = state.consecutive_failures || 0;
+  var stepPatch = computeProgressionStep(stepState, setsData, {
+    goalReps: goalReps,
+    variant: variant,
+    progressionConfirmed: progressionConfirmed,
+    holdOnSuccess: amberKneeHold
+  });
 
-  var variant = progressionVariant(s3w);
-
-  // Which set are we evaluating for success?
-  // 'ready'         → check set3 reps
-  // 'catch_up_set2' → check set2 reps
-  // 'catch_up_set1' → check set1 reps
-  var evalSetIdx = (progState === 'ready') ? 2 : (progState === 'catch_up_set2') ? 1 : 0;
-  var evalReps = reps[evalSetIdx];
-
-  // Success = hit at least goal reps on the evaluated set
-  var success = evalReps >= goalReps;
-  // Stall = under floor
-  var underFloor = evalReps < floor;
+  if (Object.keys(stepPatch).length === 0) return;
 
   var patch = {};
+  if ('s1w' in stepPatch) patch.set1_weight = stepPatch.s1w;
+  if ('s2w' in stepPatch) patch.set2_weight = stepPatch.s2w;
+  if ('s3w' in stepPatch) patch.set3_weight = stepPatch.s3w;
+  if ('progressionState' in stepPatch) patch.progression_state = stepPatch.progressionState;
+  if ('consecutiveFailures' in stepPatch) patch.consecutive_failures = stepPatch.consecutiveFailures;
 
-  if (underFloor) {
-    // Count consecutive failures — stall on 2nd
-    failures += 1;
-    patch.consecutive_failures = failures;
-    if (failures >= 2) {
-      // Deload: set3 -10%, round to nearest 5
-      var newS3 = Math.round((s3w * 0.9) / 5) * 5;
-      // Recompute set2/set1 targets after deload
-      var deloadedTargets = classicTargets(newS3);
-      patch.set3_weight = newS3;
-      // Reset to catch_up_set2 so we work back up
-      patch.progression_state = 'catch_up_set2';
-      // Set2 may now be above or below new target; set to min of current and target
-      patch.set2_weight = Math.min(s2w, deloadedTargets.target_s2);
-      patch.set1_weight = Math.min(s1w, deloadedTargets.target_s1);
-      patch.consecutive_failures = 0;
-    }
-  } else if (success && progressionConfirmed) {
-    if (amberKneeHold) return; // hold flat this session; don't touch state
-    failures = 0;
-    patch.consecutive_failures = 0;
-
-    if (variant === 'rep_ladder' && progState === 'ready') {
-      // Rep-ladder: advance weight only when ceiling reps (goal+5) are hit on set3.
-      // catch_up states fall through to classic logic to sync set1/set2 to new set3.
-      if (evalReps >= ceiling) {
-        patch.set3_weight = s3w + 5;
-        patch.progression_state = 'catch_up_set2';
-      } else {
-        patch.progression_state = 'ready';
-      }
-    } else {
-      // Classic catch-up state machine (also handles rep_ladder catch_up states)
-      if (progState === 'ready') {
-        // Set3 succeeded — advance set3 by 5, enter catch_up_set2
-        patch.set3_weight = s3w + 5;
-        patch.progression_state = 'catch_up_set2';
-      } else if (progState === 'catch_up_set2') {
-        var targets2 = classicTargets(s3w);
-        if (s2w < targets2.target_s2) {
-          patch.set2_weight = Math.min(s2w + 5, targets2.target_s2);
-          if (patch.set2_weight >= targets2.target_s2) {
-            // Set2 just reached target — skip catch_up_set1 if s1 already there too
-            patch.progression_state = (s1w >= targets2.target_s1) ? 'ready' : 'catch_up_set1';
-          }
-          // else set2 still climbing, stay in catch_up_set2
-        } else {
-          // Set2 already at target — skip catch_up_set1 if s1 already there too
-          patch.progression_state = (s1w >= targets2.target_s1) ? 'ready' : 'catch_up_set1';
-        }
-      } else if (progState === 'catch_up_set1') {
-        var targets1 = classicTargets(s3w);
-        if (s1w < targets1.target_s1) {
-          patch.set1_weight = Math.min(s1w + 5, targets1.target_s1);
-          if (patch.set1_weight >= targets1.target_s1) {
-            patch.progression_state = 'ready';
-          }
-        } else {
-          patch.progression_state = 'ready';
-        }
-      }
-    }
-  } else {
-    // Between floor and goal — partial. Reset failure counter (not a stall).
-    patch.consecutive_failures = 0;
-  }
-
-  if (Object.keys(patch).length > 0) {
-    await updateExerciseState(ex.id, patch);
-    Object.assign(ex.state, patch);
-  }
+  await updateExerciseState(ex.id, patch);
+  Object.assign(ex.state, patch);
 }
 
 // Returns a human-readable progression hint for the workout screen
@@ -1289,6 +1346,8 @@ var REHAB_EXERCISES = [
     weightKey: 'rehab_step_down_lbs',
     defaultWeight: 0,
     increment: 5,
+    rest_short_seconds: 60,
+    rest_long_seconds: 180,
     tips: [
       'Lower like you\'re trying not to wake someone downstairs. Knee traces your shoelaces the whole way.',
       'Tap the floor, don\'t rest on it. Mirror check: any knee drift = stop and reset.'
@@ -1305,12 +1364,17 @@ var REHAB_EXERCISES = [
     ]
   },
   {
+    // No weight tracking — deliberately excluded per rehab clinical rules on loaded
+    // plyometrics (rapid loading of an already-irritated joint has no analgesic upside
+    // the way isometrics do). Set/rest tracking only.
     key: 'plyo',
     match: function(s) { return s.indexOf('plyo') !== -1 || s.indexOf('hop') !== -1 || s.indexOf('bounding') !== -1; },
-    type: 'free',
+    type: 'reps_no_weight',
     sets: 3,
     reps: 10,
     label: '3 × 10',
+    rest_short_seconds: 60,
+    rest_long_seconds: 180,
     tips: [
       'Land like you\'re trying not to be heard. Springy, not stiff.',
       'Any sharp pain = stop. Plyos only when symptom-free.'
@@ -1319,10 +1383,15 @@ var REHAB_EXERCISES = [
   {
     key: 'sl_squat_box',
     match: function(s) { return s.indexOf('single-leg squat') !== -1 || s.indexOf('valgus') !== -1; },
-    type: 'free',
+    type: 'weighted',
     sets: 3,
     reps: 10,
     label: '3 × 10 each leg',
+    weightKey: 'rehab_sl_squat_box_lbs',
+    defaultWeight: 10,
+    increment: 5,
+    rest_short_seconds: 60,
+    rest_long_seconds: 180,
     tips: [
       'Sit toward the box like you might miss it — control every inch. Mirror catches knee drift.',
       'Touch, don\'t sit. Drive back up through the heel with a glute squeeze.'
@@ -1352,6 +1421,94 @@ function rehabMatchExercise(label) {
 }
 
 // =============================================================
+// REHAB PROGRESSION (weighted rehab exercises — band_walk, step_down, sl_squat_box)
+// =============================================================
+// Device-local, decoupled from the lift's DB-backed exercise_state — rehab progression
+// history does not survive a reinstall, unlike the lift's history. Accepted tradeoff of
+// keeping rehab decoupled from the lift schema (see CLAUDE.md scope boundary), not a bug.
+// Deliberately NOT gated by isKneeLoading, amber/red readiness, or deload-freeze — rehab
+// loading is supposed to continue through a lift-side deload. See rehab.md.
+//
+// Persisted under the exercise's existing weightKey (same localStorage entry already
+// used for the plain weight number pre-progression — now carries more state):
+//   { weight, consecutiveFailures, lastReps }
+// progressionState is NOT persisted — rehab exercises use a single shared weight across
+// all sets (no per-set set1/set2/set3 weight like the lift), so there is nothing to
+// "catch up" between sets. Every round is evaluated fresh against the last set as if
+// 'ready'; catch_up_set2/catch_up_set1 are a lift-only concept. See rehab.md.
+
+function loadRehabProgress(ex) {
+  var fallback = { weight: ex.defaultWeight, progressionState: 'ready', consecutiveFailures: 0, lastReps: null };
+  if (!ex.weightKey) return fallback;
+  var raw = localStorage.getItem(ex.weightKey);
+  if (raw === null) return fallback;
+  try {
+    var parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && typeof parsed.weight === 'number') {
+      return {
+        weight: parsed.weight,
+        progressionState: 'ready',
+        consecutiveFailures: parsed.consecutiveFailures || 0,
+        lastReps: parsed.lastReps || null
+      };
+    }
+  } catch (e) {
+    // Legacy plain-number value from before progression tracking existed
+  }
+  var legacyWeight = parseInt(raw, 10);
+  return {
+    weight: isNaN(legacyWeight) ? ex.defaultWeight : legacyWeight,
+    progressionState: 'ready',
+    consecutiveFailures: 0,
+    lastReps: null
+  };
+}
+
+function saveRehabProgress(ex, progress) {
+  if (!ex.weightKey) return;
+  localStorage.setItem(ex.weightKey, JSON.stringify(progress));
+}
+
+// Human-readable progression hint, mirrors the lift's progressionHint().
+function rehabProgressionHint(ex, progress) {
+  var variant = progressionVariant(progress.weight);
+  var goalReps = ex.reps;
+  var next = progress.weight + ex.increment;
+  if (variant === 'rep_ladder') {
+    return 'Hit ' + repCeiling(goalReps) + ' reps on set ' + ex.sets + ' → advance to ' + next + ' lbs';
+  }
+  return 'Hit ' + goalReps + ' reps on set ' + ex.sets + ' → advance to ' + next + ' lbs';
+}
+
+// Adapts the shared computeProgressionStep to rehab's single-shared-weight model.
+// Feeds s1w = s2w = s3w = progress.weight and progressionState = 'ready' on every call
+// (rehab never persists catch-up states — see comment above). The evaluated set is
+// therefore always the last set (index ex.sets-1), matching the classic/rep-ladder
+// 'ready' behavior: classic mode advances weight on any goal-reps success (no other sets
+// to catch up here), rep-ladder mode requires hitting the ceiling first. Stall/deload
+// (2 consecutive under-floor → -10%) is identical to the lift's.
+function runRehabProgressionStep(ex, progress, setsData, progressionConfirmed) {
+  var variant = progressionVariant(progress.weight);
+  var stepState = {
+    s1w: progress.weight, s2w: progress.weight, s3w: progress.weight,
+    progressionState: 'ready',
+    consecutiveFailures: progress.consecutiveFailures || 0
+  };
+  var stepPatch = computeProgressionStep(stepState, setsData, {
+    goalReps: ex.reps,
+    variant: variant,
+    progressionConfirmed: progressionConfirmed
+  });
+
+  return {
+    weight: ('s3w' in stepPatch) ? stepPatch.s3w : progress.weight,
+    progressionState: 'ready',
+    consecutiveFailures: ('consecutiveFailures' in stepPatch) ? stepPatch.consecutiveFailures : (progress.consecutiveFailures || 0),
+    lastReps: setsData.map(function(s) { return s.reps; })
+  };
+}
+
+// =============================================================
 // RENDER ENGINE
 // =============================================================
 
@@ -1375,7 +1532,7 @@ function render() {
 
   if (APP.screen === 'rest' && APP.timerActive) {
     APP.timerInterval = setInterval(function() {
-      APP.timerRemaining = Math.max(0, Math.round((APP.timerEndTime - Date.now()) / 1000));
+      APP.timerRemaining = countdownRemaining(APP.timerEndTime);
       var el = document.getElementById('tn');
       if (el) el.textContent = fmt(APP.timerRemaining);
       if (APP.timerRemaining <= 0) {
@@ -1410,7 +1567,7 @@ function render() {
           // Start 2-minute rest before next set
           APP.rehabRestActive = true;
           APP.rehabRestRemaining = 120;
-          APP.rehabRestEndTime = Date.now() + 120000;
+          APP.rehabRestEndTime = countdownEndTime(120);
           scheduleTimerNotification(APP.rehabRestEndTime, 'Set ' + (nextSet + 1), ex.label || ex.match || 'Rehab');
         }
         render();
@@ -1420,7 +1577,7 @@ function render() {
 
   if (APP.screen === 'rehab' && APP.rehabRestActive) {
     APP.timerInterval = setInterval(function() {
-      APP.rehabRestRemaining = Math.max(0, Math.round((APP.rehabRestEndTime - Date.now()) / 1000));
+      APP.rehabRestRemaining = countdownRemaining(APP.rehabRestEndTime);
       var el = document.getElementById('rehab-rest-display');
       if (el) el.textContent = fmt(APP.rehabRestRemaining);
       if (APP.rehabRestRemaining <= 0) {
@@ -1944,10 +2101,12 @@ function rRehab() {
     }
   }
 
-  // ---- WEIGHTED SETS (band walks, step-downs) ----
+  // ---- WEIGHTED SETS (band walks, step-downs, sl squat box) ----
   else if (ex.type === 'weighted') {
-    // Weight adjuster
     var w = APP.rehabWeight;
+    var progress = APP.rehabProgress || { weight: w, progressionState: 'ready', consecutiveFailures: 0, lastReps: null };
+
+    // Weight adjuster (manual override — same mechanism the progression engine writes through)
     html += '<div style="margin-bottom:16px">'
       + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">Weight</p>'
       + '<div style="display:flex;align-items:center;gap:0;border:0.5px solid var(--color-border);border-radius:var(--radius-md);overflow:hidden">'
@@ -1958,6 +2117,11 @@ function rRehab() {
       + '</div>'
       + '<button onclick="rehabWeightAdj(' + ex.increment + ')" style="padding:12px 20px;background:var(--color-bg-secondary);border:none;font-size:20px;color:var(--color-text);min-width:56px">+</button>'
       + '</div></div>';
+
+    if (progress.lastReps && progress.lastReps.length) {
+      html += '<p style="font-size:11px;color:var(--color-text-tertiary);margin:-10px 0 14px">Last round: '
+        + progress.lastReps.map(function(r) { return r == null ? '—' : r; }).join(' / ') + ' reps</p>';
+    }
 
     // Set tracker
     html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">' + ex.label + '</p>';
@@ -1972,6 +2136,8 @@ function rRehab() {
     html += '</div>';
 
     var completedCount = APP.rehabSetsCompleted.filter(Boolean).length;
+    var isLastSet = completedCount === ex.sets - 1;
+
     if (APP.rehabRestActive) {
       var nextSetNum2 = completedCount + 1;
       html += '<div style="text-align:center;margin-bottom:20px">'
@@ -1981,7 +2147,59 @@ function rRehab() {
         + '</div>'
         + '<button onclick="rehabSkipRest()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Start set ' + nextSetNum2 + ' now</button>';
     } else if (completedCount < ex.sets) {
-      html += '<button onclick="rehabLogSet()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Log set ' + (completedCount + 1) + ' · ' + ex.reps + ' reps</button>';
+      // Reps stepper — pre-filled to the target, adjustable before logging
+      html += '<div style="background:var(--color-bg-secondary);border-radius:var(--radius-lg);padding:20px;text-align:center;margin-bottom:14px">'
+        + '<p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">Set ' + (completedCount + 1) + ' reps</p>'
+        + '<div id="rrn" style="font-size:36px;font-weight:500;line-height:1;margin-bottom:14px">' + APP.rehabPendingReps + '</div>'
+        + '<div style="display:flex;justify-content:center;align-items:center;gap:20px">'
+        + '<button onclick="rehabRepsAdj(-1)" style="width:40px;height:40px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center" aria-label="fewer reps"><i class="ti ti-minus"></i></button>'
+        + '<span style="font-size:11px;color:var(--color-text-tertiary)">adjust</span>'
+        + '<button onclick="rehabRepsAdj(1)" style="width:40px;height:40px;border-radius:50%;border:0.5px solid var(--color-border-md);background:var(--color-bg);font-size:18px;display:flex;align-items:center;justify-content:center" aria-label="more reps"><i class="ti ti-plus"></i></button>'
+        + '</div></div>';
+
+      if (isLastSet) {
+        var hint = rehabProgressionHint(ex, progress);
+        var confirmed = APP.rehabProgressionReady;
+        html += '<button onclick="toggleRehabProgressionReady()" style="width:100%;padding:14px;border-radius:var(--radius-md);border:0.5px solid ' + (confirmed ? 'var(--color-text-success)' : 'var(--color-border)') + ';background:' + (confirmed ? 'var(--color-bg-success,#0d2b1a)' : 'transparent') + ';color:' + (confirmed ? 'var(--color-text-success)' : 'var(--color-text-secondary)') + ';font-size:14px;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px">'
+          + '<i class="ti ti-' + (confirmed ? 'circle-check-filled' : 'circle-check') + '" style="font-size:16px"></i>'
+          + (confirmed ? 'Confirmed — ' + hint : hint)
+          + '</button>';
+      }
+
+      html += '<button onclick="rehabLogSet()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Log set ' + (completedCount + 1) + '</button>';
+    }
+
+    if (allSetsComplete) {
+      html += rRehabCompleteButton(rehabLogged);
+    }
+  }
+
+  // ---- REPS-ONLY SETS, NO WEIGHT (plyo) ----
+  // No progression, no rep entry, no confirm gate — just set completion + rest timer.
+  // Weight tracking deliberately excluded (see REHAB_EXERCISES comment for plyo).
+  else if (ex.type === 'reps_no_weight') {
+    html += '<p style="font-size:13px;font-weight:500;margin-bottom:10px">' + ex.label + '</p>';
+    html += '<div style="display:flex;gap:8px;margin-bottom:16px">';
+    for (var s3 = 0; s3 < ex.sets; s3++) {
+      var s3Done = APP.rehabSetsCompleted[s3] === true;
+      var s3Active = !s3Done && s3 === APP.rehabSetsCompleted.filter(Boolean).length;
+      html += '<div style="flex:1;height:44px;border-radius:var(--radius-md);background:' + (s3Done ? 'var(--color-text-success)' : 'var(--color-bg-secondary)') + ';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:' + (s3Done ? 'var(--color-bg)' : 'var(--color-text-tertiary)') + ';border:0.5px solid ' + (s3Active ? 'var(--color-border-md)' : 'var(--color-border)') + ';opacity:' + (s3Done || s3Active ? '1' : '0.4') + '">'
+        + (s3Done ? '<i class="ti ti-check" style="font-size:14px"></i>' : (s3Active ? ex.reps + ' reps' : (s3 + 1)))
+        + '</div>';
+    }
+    html += '</div>';
+
+    var completedCountP = APP.rehabSetsCompleted.filter(Boolean).length;
+    if (APP.rehabRestActive) {
+      var nextSetNumP = completedCountP + 1;
+      html += '<div style="text-align:center;margin-bottom:20px">'
+        + '<p style="font-size:12px;font-weight:500;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Rest</p>'
+        + '<div id="rehab-rest-display" style="font-size:64px;font-weight:200;letter-spacing:-2px;line-height:1">' + fmt(APP.rehabRestRemaining) + '</div>'
+        + '<p style="font-size:12px;color:var(--color-text-tertiary);margin-top:4px">Set ' + nextSetNumP + ' starts after rest</p>'
+        + '</div>'
+        + '<button onclick="rehabSkipRest()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Start set ' + nextSetNumP + ' now</button>';
+    } else if (completedCountP < ex.sets) {
+      html += '<button onclick="rehabLogPlainSet()" style="width:100%;padding:14px;border-radius:var(--radius-md);background:var(--color-text-warning);color:var(--color-bg);border:none;font-size:16px;font-weight:500;margin-bottom:10px">Log set ' + (completedCountP + 1) + ' · ' + ex.reps + ' reps</button>';
     }
 
     if (allSetsComplete) {
@@ -2435,9 +2653,13 @@ function rSupersetGroup(group, startIdx) {
     + '</div>';
 
   group.forEach(function(ex, i) {
-    html += '<div style="padding:8px 0;' + (i < group.length-1 ? 'border-bottom:0.5px solid var(--color-border)' : '') + '">'
+    var exIdx = startIdx + i;
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;' + (i < group.length-1 ? 'border-bottom:0.5px solid var(--color-border)' : '') + '">'
+      + '<div>'
       + '<p style="font-size:15px;font-weight:500">' + ex.name + '</p>'
       + '<p style="font-size:12px;color:var(--color-text-secondary)">' + ex.goal_reps + ' reps</p>'
+      + '</div>'
+      + '<button onclick="event.stopPropagation();showExEditSheet(' + exIdx + ',true)" style="padding:8px 10px;border-radius:var(--radius-md);background:transparent;color:var(--color-text-tertiary);border:none;font-size:16px;display:flex;align-items:center"><i class="ti ti-pencil"></i></button>'
       + '</div>';
   });
 
@@ -2783,7 +3005,7 @@ async function doLogSet() {
   if (setIdx < 2) {
     // Start rest timer
     APP.timerRemaining = setIdx === 0 ? (ex.rest_short_seconds || 60) : (ex.rest_long_seconds || 180);
-    APP.timerEndTime = Date.now() + APP.timerRemaining * 1000;
+    APP.timerEndTime = countdownEndTime(APP.timerRemaining);
     APP.timerActive = true;
     scheduleTimerNotification(APP.timerEndTime, 'Set ' + (setIdx + 2), ex.name);
     APP.screen = 'rest';
@@ -2819,7 +3041,7 @@ async function doSkipSet(reason) {
 
   if (setIdx < 2) {
     APP.timerRemaining = setIdx === 0 ? (ex.rest_short_seconds || 60) : (ex.rest_long_seconds || 180);
-    APP.timerEndTime = Date.now() + APP.timerRemaining * 1000;
+    APP.timerEndTime = countdownEndTime(APP.timerRemaining);
     APP.timerActive = true;
     scheduleTimerNotification(APP.timerEndTime, 'Set ' + (setIdx + 2), ex.name);
     APP.screen = 'rest';
@@ -3696,6 +3918,7 @@ function goRehab() {
   if (APP.rehabSetsCompleted.length !== numSets) {
     APP.rehabSetsCompleted = [];
     for (var i = 0; i < numSets; i++) APP.rehabSetsCompleted.push(false);
+    APP.rehabLoggedReps = [];
   }
   var prevActive = APP.rehabActiveSet;
   APP.rehabActiveSet = APP.rehabSetsCompleted.indexOf(false);
@@ -3706,19 +3929,22 @@ function goRehab() {
       APP.rehabTimerRemaining = ex.duration;
     }
     APP.rehabTimerActive = false; // always pause on re-entry
-    // Keep rest active if it was running (user navigated away mid-rest)
-    if (APP.rehabRestActive && APP.rehabRestEndTime) {
-      APP.rehabRestRemaining = Math.max(0, Math.round((APP.rehabRestEndTime - Date.now()) / 1000));
-      if (APP.rehabRestRemaining <= 0) {
-        APP.rehabRestActive = false;
-        APP.rehabRestEndTime = null;
-      }
+  }
+  // Keep inter-set rest active if it was running (user navigated away mid-rest) —
+  // applies to any exercise type that uses rehabRestActive (timed, weighted, reps_no_weight).
+  if (APP.rehabRestActive && APP.rehabRestEndTime) {
+    APP.rehabRestRemaining = countdownRemaining(APP.rehabRestEndTime);
+    if (APP.rehabRestRemaining <= 0) {
+      APP.rehabRestActive = false;
+      APP.rehabRestEndTime = null;
     }
   }
-  // Load saved weight for weighted exercises
+  // Load progression state + weight for weighted exercises (band_walk, step_down, sl_squat_box)
   if (ex.type === 'weighted' && ex.weightKey) {
-    var saved = localStorage.getItem(ex.weightKey);
-    APP.rehabWeight = saved !== null ? parseInt(saved, 10) : ex.defaultWeight;
+    APP.rehabProgress = loadRehabProgress(ex);
+    APP.rehabWeight = APP.rehabProgress.weight;
+    APP.rehabPendingReps = ex.reps;
+    APP.rehabProgressionReady = false;
   }
   APP.screen = 'rehab';
   render();
@@ -3769,25 +3995,81 @@ function rehabSkipRest() {
 function rehabWeightAdj(delta) {
   var ex = rehabMatchExercise(activeRehabLabel());
   APP.rehabWeight = Math.max(0, APP.rehabWeight + delta);
-  if (ex.weightKey) localStorage.setItem(ex.weightKey, APP.rehabWeight);
+  if (APP.rehabProgress) {
+    APP.rehabProgress.weight = APP.rehabWeight;
+    saveRehabProgress(ex, APP.rehabProgress);
+  } else if (ex.weightKey) {
+    localStorage.setItem(ex.weightKey, APP.rehabWeight);
+  }
+  render();
+}
+
+function rehabRepsAdj(delta) {
+  APP.rehabPendingReps = Math.max(0, APP.rehabPendingReps + delta);
+  var e = document.getElementById('rrn');
+  if (e) e.textContent = APP.rehabPendingReps;
+}
+
+function toggleRehabProgressionReady() {
+  APP.rehabProgressionReady = !APP.rehabProgressionReady;
   render();
 }
 
 function rehabLogSet() {
   var completedCount = APP.rehabSetsCompleted.filter(Boolean).length;
-  if (completedCount < APP.rehabSetsCompleted.length) {
-    APP.rehabSetsCompleted[completedCount] = true;
-    var ex = rehabMatchExercise(activeRehabLabel());
-    if (ex.weightKey) localStorage.setItem(ex.weightKey, APP.rehabWeight);
-    // Start rest timer between sets (60s after set 1, 180s after set 2+)
-    var nextSet = completedCount + 1;
-    if (nextSet < ex.sets && ex.rest_short_seconds) {
+  if (completedCount >= APP.rehabSetsCompleted.length) { render(); return; }
+
+  var ex = rehabMatchExercise(activeRehabLabel());
+  APP.rehabLoggedReps[completedCount] = APP.rehabPendingReps;
+  APP.rehabSetsCompleted[completedCount] = true;
+
+  var nextSet = completedCount + 1;
+  if (nextSet >= ex.sets) {
+    finishRehabExercise(ex);
+  } else {
+    APP.rehabPendingReps = ex.reps; // reset stepper for the next set
+    if (ex.rest_short_seconds) {
       var restDur = completedCount === 0 ? ex.rest_short_seconds : ex.rest_long_seconds;
       APP.rehabRestActive = true;
       APP.rehabRestRemaining = restDur;
-      APP.rehabRestEndTime = Date.now() + restDur * 1000;
+      APP.rehabRestEndTime = countdownEndTime(restDur);
       scheduleTimerNotification(APP.rehabRestEndTime, 'Set ' + (nextSet + 1), ex.label || 'Rehab');
     }
+  }
+  render();
+}
+
+// Runs the shared progression math against this round's logged reps and persists
+// the result to localStorage. Mirrors the lift's finishExercise/runProgressionEngine
+// pairing, but with no DB write — see loadRehabProgress/saveRehabProgress.
+function finishRehabExercise(ex) {
+  var progress = APP.rehabProgress;
+  var progressionConfirmed = APP.rehabProgressionReady;
+  APP.rehabProgressionReady = false;
+
+  var setsData = APP.rehabLoggedReps.map(function(r) { return { reps: r, skipped: false }; });
+  var next = runRehabProgressionStep(ex, progress, setsData, progressionConfirmed);
+
+  APP.rehabProgress = next;
+  APP.rehabWeight = next.weight;
+  saveRehabProgress(ex, next);
+}
+
+// Plyo (reps_no_weight) — no reps entry, no progression, just set-complete + rest.
+function rehabLogPlainSet() {
+  var completedCount = APP.rehabSetsCompleted.filter(Boolean).length;
+  if (completedCount >= APP.rehabSetsCompleted.length) { render(); return; }
+
+  var ex = rehabMatchExercise(activeRehabLabel());
+  APP.rehabSetsCompleted[completedCount] = true;
+
+  var nextSet = completedCount + 1;
+  if (nextSet < ex.sets && ex.rest_short_seconds) {
+    var restDur = completedCount === 0 ? ex.rest_short_seconds : ex.rest_long_seconds;
+    APP.rehabRestActive = true;
+    APP.rehabRestRemaining = restDur;
+    APP.rehabRestEndTime = countdownEndTime(restDur);
+    scheduleTimerNotification(APP.rehabRestEndTime, 'Set ' + (nextSet + 1), ex.label || 'Rehab');
   }
   render();
 }
@@ -3957,7 +4239,7 @@ document.addEventListener('visibilitychange', function() {
   // Wake locks auto-release when the page is hidden — re-acquire if a timer is still running.
   if (aTimerIsRunning()) requestWakeLock();
   if (!APP.timerActive || !APP.timerEndTime) return;
-  APP.timerRemaining = Math.max(0, Math.round((APP.timerEndTime - Date.now()) / 1000));
+  APP.timerRemaining = countdownRemaining(APP.timerEndTime);
   // If timer already expired while in background, fire immediately
   if (APP.timerRemaining <= 0) {
     clearInterval(APP.timerInterval);
@@ -3979,6 +4261,20 @@ document.addEventListener('visibilitychange', function() {
 function fmt(s) {
   var m = Math.floor(s / 60), r = s % 60;
   return m > 0 ? m + ':' + (r < 10 ? '0' : '') + r : s + 's';
+}
+
+// Absolute-end-time countdown helpers — shared by the lift rest timer
+// (APP.timerActive/timerEndTime) and the rehab inter-set rest timer
+// (APP.rehabRestActive/rehabRestEndTime) so both anchor identically instead of
+// maintaining two near-duplicate Date.now() calculations that could drift apart
+// under future edits. They stay as separate state slots (not one shared variable)
+// because a rehab rest can be left running in the background while the user
+// navigates to a lift set, so the two timers must be able to run concurrently.
+function countdownEndTime(durationSeconds) {
+  return Date.now() + durationSeconds * 1000;
+}
+function countdownRemaining(endTime) {
+  return Math.max(0, Math.round((endTime - Date.now()) / 1000));
 }
 
 // =============================================================

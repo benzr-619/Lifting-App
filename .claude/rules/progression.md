@@ -7,7 +7,20 @@ metadata:
 
 # Progression Engine
 
-**Key functions:** `runProgressionEngine`, `progressionVariant`, `classicTargets`, `repFloor`
+**Key functions:** `runProgressionEngine`, `progressionVariant`, `classicTargets`, `repFloor`, `repCeiling`, `computeProgressionStep`
+
+## Shared progression math (`computeProgressionStep`)
+The catch-up target formulas (`classicTargets`), rep floor/ceiling (`repFloor`/`repCeiling`), and the 2-consecutive-under-floor stall/deload detection are implemented once, in `computeProgressionStep` — a pure, storage-agnostic function shared by the lift engine (`runProgressionEngine`, DB-backed `exercise_state` rows) and the rehab engine (`runRehabProgressionStep` in `.claude/rules/rehab.md`, localStorage-backed records). Neither `computeProgressionStep` nor the three math helpers touch a database or localStorage — they take plain weight/state inputs and return a patch; callers own persistence. This is the single source of truth for progression math — do not reimplement catch-up/stall logic anywhere else.
+
+Signature: `computeProgressionStep(state, setsData, opts)`
+- `state`: `{ s1w, s2w, s3w, progressionState, consecutiveFailures }` — storage-agnostic weight/state shape (not DB column names).
+- `setsData`: `[{reps, skipped}, ...]`, index 0 = set1.
+- `opts`: `{ goalReps, variant, progressionConfirmed, holdOnSuccess }`. `holdOnSuccess` is a generic escape hatch for "a success+confirmed evaluation should be a total no-op, don't even persist an in-flight state correction" — the lift engine passes `amberKneeHold` through it (see Amber suppression below). Rehab never sets it since rehab has no readiness-gate concept by design.
+- Returns a patch with only the changed keys (`s1w`/`s2w`/`s3w`/`progressionState`/`consecutiveFailures`), or `{}` if nothing changes.
+
+`runProgressionEngine` translates between the DB's `set1_weight`/`set2_weight`/`set3_weight`/`progression_state`/`consecutive_failures` column names and the shared function's neutral `s1w`/`s2w`/`s3w`/`progressionState`/`consecutiveFailures` shape immediately before/after calling `computeProgressionStep`. No lift-specific logic (ROM hold, deload freeze, amber suppression) lives inside the shared function — those gates run in `runProgressionEngine` before it decides whether/how to call `computeProgressionStep`.
+
+**Rep-ladder catch-up correction** (inside `computeProgressionStep`): a `rep_ladder`-variant exercise in `'ready'` state is only actually ready once set1/set2 have reached their `classicTargets` for the current set3 weight. If either lags (e.g. a freshly-seeded exercise with set1/set2 below set3 — this happened for real with Lateral raise/Curl, corrected 2026-08-09), the function silently treats the exercise as `catch_up_set2`/`catch_up_set1` instead of requiring a fresh ceiling-rep hit on set3, and persists the correction on the very next evaluation (success, partial, or stall) — it doesn't wait for a specific outcome. Apply the same check when hand-seeding new rep-ladder exercises in `supabase/seed.sql`: don't seed `'ready'` if set1/set2 are below their classic targets for set3 — seed the correct catch-up state directly.
 
 ## Mode selection
 Per exercise, chosen at runtime via `progressionVariant(set3_weight)`: if a 5 lb step is >20% of set-3 weight → **rep-ladder**. Otherwise → **classic catch-up**.
@@ -61,7 +74,7 @@ Weight (and stance) advances only when user taps "Confirm progression" on set 3 
 ## Amber suppression (knee-aware)
 `isKneeLoading(ex)` substring-matches `ex.name` (lowercased) against: `['front squat', 'single-leg bench squat', 'romanian deadlift', 'push press']`.
 
-When amber + knee-loading + user hit goal + confirmed: early `return` with **no DB write**. Stall counting still runs. Stance and non-knee-loading exercises are unaffected.
+When amber + knee-loading + user hit goal + confirmed: `runProgressionEngine` passes `holdOnSuccess: true` into `computeProgressionStep`, which returns `{}` (no write) for that evaluation — **no DB write**, and note this discards even an in-flight rep-ladder catch-up correction for that one evaluation (matches the original "hold flat this session; don't touch state" behavior exactly). Stall counting still runs on other paths (underFloor). Stance and non-knee-loading exercises are unaffected.
 
 ## Detraining deload (`checkDetrain`)
 Called once per fresh session start (not for resumed sessions). Checks calendar days elapsed since each weighted exercise's most recent completed set, using the last 10 completed sessions for the current gym_day as the history window.
