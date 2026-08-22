@@ -542,6 +542,7 @@ async function loadExercises(gymDay) {
     .from('exercises')
     .select('*, exercise_state(*)')
     .eq('gym_day', gymDay)
+    .eq('is_active', true)
     .order('day_order', { ascending: true })
     .order('is_optional', { ascending: true });
 
@@ -748,6 +749,8 @@ function repCeiling(goalReps) {
 //         total no-op (no patch at all). Used by the lift's amber-knee-loading gate;
 //         rehab never sets this since it has no readiness-gate concept (by design —
 //         see rehab.md).
+//         maxWeight (optional) — equipment ceiling (e.g. 80 lbs, Ben's adjustable
+//         dumbbells). null/undefined = uncapped, preserves all prior behavior exactly.
 //       }
 //
 // Returns a patch object with only the changed keys (subset of state's shape), or {}
@@ -758,8 +761,12 @@ function computeProgressionStep(state, setsData, opts) {
   var failures = state.consecutiveFailures || 0;
   var goalReps = opts.goalReps;
   var variant = opts.variant;
+  var maxWeight = opts.maxWeight;
   var floor = repFloor(goalReps);
   var ceiling = repCeiling(goalReps);
+
+  // Terminal state — needs a new progression plan, no auto-swap. Evaluation stops here.
+  if (progState === 'maxed') return {};
 
   var hasSkip = setsData.some(function(s) { return s.skipped; });
   if (hasSkip) return {};
@@ -769,16 +776,25 @@ function computeProgressionStep(state, setsData, opts) {
 
   var patch = {};
 
+  // Equipment-ceiling state: once set3 sits at max_weight, the percentage ramp
+  // (classicTargets) would keep asking set2/set1 to chase a moving target derived
+  // from a set3 that can no longer move — flatten both catch-up targets to the
+  // ceiling itself instead. This is the only stimulus lever left once set3 is capped.
+  var atCap = (maxWeight != null && s3w >= maxWeight);
+  var rampTargets = atCap ? { target_s2: maxWeight, target_s1: maxWeight } : classicTargets(s3w);
+  var allAtCap = atCap && s2w >= maxWeight && s1w >= maxWeight;
+
   // Rep-ladder catch-up correction: 'ready' is only valid once set1/set2 have already
-  // reached their classicTargets for the current set3 weight. If they lag (e.g. a
-  // freshly-seeded exercise with set1/set2 below set3), treat this as needing catch-up
-  // rather than requiring a fresh ceiling-rep hit on set3.
-  if (variant === 'rep_ladder' && progState === 'ready') {
-    var catchTargets = classicTargets(s3w);
-    if (s2w < catchTargets.target_s2) {
+  // reached their ramp targets for the current set3 weight. If they lag (e.g. a
+  // freshly-seeded exercise with set1/set2 below set3, or set2/set1 still trailing a
+  // freshly-capped set3), treat this as needing catch-up rather than requiring a fresh
+  // ceiling-rep hit on set3. Capped exercises always need this flattening pass even in
+  // classic mode, since there's no other way to bring set1/set2 up to the ceiling.
+  if ((variant === 'rep_ladder' || atCap) && progState === 'ready') {
+    if (s2w < rampTargets.target_s2) {
       progState = 'catch_up_set2';
       patch.progressionState = 'catch_up_set2';
-    } else if (s1w < catchTargets.target_s1) {
+    } else if (s1w < rampTargets.target_s1) {
       progState = 'catch_up_set1';
       patch.progressionState = 'catch_up_set1';
     }
@@ -798,9 +814,13 @@ function computeProgressionStep(state, setsData, opts) {
     failures += 1;
     patch.consecutiveFailures = failures;
     if (failures >= 2) {
-      // Deload: set3 -10%, round to nearest 5
+      // Deload: set3 -10%, round to nearest 5 (clamped at the ceiling, though a
+      // deload only ever moves weight down so this is belt-and-suspenders)
       var newS3 = Math.round((s3w * 0.9) / 5) * 5;
-      var deloadedTargets = classicTargets(newS3);
+      if (maxWeight != null) newS3 = Math.min(newS3, maxWeight);
+      var deloadedTargets = (maxWeight != null && newS3 >= maxWeight)
+        ? { target_s2: maxWeight, target_s1: maxWeight }
+        : classicTargets(newS3);
       patch.s3w = newS3;
       patch.progressionState = 'catch_up_set2';
       patch.s2w = Math.min(s2w, deloadedTargets.target_s2);
@@ -811,20 +831,29 @@ function computeProgressionStep(state, setsData, opts) {
     if (opts.holdOnSuccess) return {}; // hold flat this evaluation; don't touch state
     patch.consecutiveFailures = 0;
 
-    if (variant === 'rep_ladder' && progState === 'ready') {
+    if (progState === 'ready' && allAtCap) {
+      // All three sets already at the equipment ceiling — no weight left to add.
+      // A fresh ceiling-rep hit is the only remaining signal, and it's terminal:
+      // there's nowhere further to progress to, so flag 'maxed' instead of a weight bump.
       if (evalReps >= ceiling) {
-        patch.s3w = s3w + 5;
+        patch.progressionState = 'maxed';
+      }
+      // below ceiling but >= goal: stay 'ready', no further patch
+    } else if (variant === 'rep_ladder' && progState === 'ready') {
+      if (evalReps >= ceiling) {
+        patch.s3w = maxWeight != null ? Math.min(s3w + 5, maxWeight) : s3w + 5;
         patch.progressionState = 'catch_up_set2';
       } else {
         patch.progressionState = 'ready';
       }
     } else {
-      // Classic catch-up state machine (also handles rep_ladder catch_up states)
+      // Classic catch-up state machine (also handles rep_ladder catch_up states,
+      // and capped exercises flattening set1/set2 up toward the ceiling)
       if (progState === 'ready') {
-        patch.s3w = s3w + 5;
+        patch.s3w = maxWeight != null ? Math.min(s3w + 5, maxWeight) : s3w + 5;
         patch.progressionState = 'catch_up_set2';
       } else if (progState === 'catch_up_set2') {
-        var targets2 = classicTargets(s3w);
+        var targets2 = rampTargets;
         if (s2w < targets2.target_s2) {
           patch.s2w = Math.min(s2w + 5, targets2.target_s2);
           if (patch.s2w >= targets2.target_s2) {
@@ -834,7 +863,7 @@ function computeProgressionStep(state, setsData, opts) {
           patch.progressionState = (s1w >= targets2.target_s1) ? 'ready' : 'catch_up_set1';
         }
       } else if (progState === 'catch_up_set1') {
-        var targets1 = classicTargets(s3w);
+        var targets1 = rampTargets;
         if (s1w < targets1.target_s1) {
           patch.s1w = Math.min(s1w + 5, targets1.target_s1);
           if (patch.s1w >= targets1.target_s1) {
@@ -940,7 +969,8 @@ async function runProgressionEngine(ex, setsData) {
     goalReps: goalReps,
     variant: variant,
     progressionConfirmed: progressionConfirmed,
-    holdOnSuccess: amberKneeHold
+    holdOnSuccess: amberKneeHold,
+    maxWeight: ex.max_weight != null ? Number(ex.max_weight) : null
   });
 
   if (Object.keys(stepPatch).length === 0) return;
@@ -972,6 +1002,28 @@ function progressionHint(ex) {
   }
 
   if (ex.is_bodyweight) return '';
+
+  // Terminal — separately flagged as a persistent card badge; no further hint to show.
+  if (st.progression_state === 'maxed') return '';
+
+  var maxWeight = ex.max_weight != null ? Number(ex.max_weight) : null;
+  var atCap = maxWeight != null && st.set3_weight >= maxWeight;
+
+  // Capped: the percentage ramp is replaced by flat targets at the ceiling (see
+  // computeProgressionStep), so the hint must reflect that instead of classicTargets.
+  if (atCap) {
+    if (st.progression_state === 'ready') {
+      return 'At the ' + maxWeight + ' lb ceiling — hit ' + (ex.goal_reps + 5) + ' reps on set 3 to mark maxed';
+    }
+    if (st.progression_state === 'catch_up_set2') {
+      return 'Catching up Set 2 → target ' + maxWeight + ' lbs (ceiling)';
+    }
+    if (st.progression_state === 'catch_up_set1') {
+      return 'Catching up Set 1 → target ' + maxWeight + ' lbs (ceiling)';
+    }
+    return '';
+  }
+
   var variant = progressionVariant(st.set3_weight);
 
   if (variant === 'rep_ladder') {
@@ -2610,6 +2662,12 @@ function rExerciseRow(ex, idx, total) {
 
   html += '</div>';
 
+  if (st && st.progression_state === 'maxed') {
+    html += '<div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--color-border);font-size:12px;color:var(--color-text-warning)">'
+      + '<i class="ti ti-alert-triangle" style="font-size:12px;margin-right:4px"></i>'
+      + 'Maxed out — needs a new progression plan.</div>';
+  }
+
   if (ex.form_cue && isActive) {
     html += '<div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--color-border);font-size:12px;color:var(--color-text-secondary)">'
       + '<i class="ti ti-bulb" style="font-size:12px;margin-right:4px"></i>' + ex.form_cue + '</div>';
@@ -2688,15 +2746,22 @@ function rLogSet() {
   var weightFontSize = isWeighted ? '60px' : '26px';
   var weightFontWeight = isWeighted ? '700' : '600';
 
-  // Rep-ladder reminder on sets 1-2 (set 3 already has the confirm button with the hint)
-  var isRepLadder = isWeighted && progressionVariant(st.set3_weight) === 'rep_ladder' && st.progression_state === 'ready';
+  // Rep-ladder reminder on sets 1-2 (set 3 already has the confirm button with the hint).
+  // Also fires once all three sets sit at the equipment ceiling — evaluation there is
+  // rep-ceiling based regardless of variant (see computeProgressionStep).
+  var maxWeightForHint = ex.max_weight != null ? Number(ex.max_weight) : null;
+  var allAtCapForHint = maxWeightForHint != null &&
+    st.set1_weight >= maxWeightForHint && st.set2_weight >= maxWeightForHint && st.set3_weight >= maxWeightForHint;
+  var isRepLadder = isWeighted && st.progression_state === 'ready' &&
+    (allAtCapForHint || progressionVariant(st.set3_weight) === 'rep_ladder');
   var ladderHintHtml = '';
   if (isRepLadder && setIdx < 2) {
     var ladderCeiling = ex.goal_reps + 5;
-    var ladderNext = st.set3_weight + 5;
     ladderHintHtml = '<p style="font-size:12px;color:var(--color-text-info);margin-bottom:16px;display:flex;align-items:center;gap:5px">'
       + '<i class="ti ti-stairs-up" style="font-size:12px"></i>'
-      + 'Rep ladder · hit ' + ladderCeiling + ' on set 3 → ' + ladderNext + ' lbs'
+      + (allAtCapForHint
+          ? 'Rep ceiling · hit ' + ladderCeiling + ' on set 3 to mark maxed'
+          : 'Rep ladder · hit ' + ladderCeiling + ' on set 3 → ' + (st.set3_weight + 5) + ' lbs')
       + '</p>';
   }
 
@@ -2736,6 +2801,11 @@ function rLogSet() {
     + (setIdx === 2 && (!ex.is_bodyweight || ex.progression_type === 'stance')
       ? (function() {
           var hint = progressionHint(ex);
+          if (ex.state.progression_state === 'maxed') {
+            return '<p style="text-align:center;font-size:13px;color:var(--color-text-warning);margin-top:10px">'
+              + '<i class="ti ti-alert-triangle" style="font-size:12px;margin-right:4px"></i>'
+              + 'Maxed out — needs a new progression plan.</p>';
+          }
           if (ex.progression_hold_until_phase && APP.planState.rom_stage < ex.progression_hold_until_phase) {
             return '<p style="text-align:center;font-size:13px;color:var(--color-text-secondary);margin-top:10px">'
               + '<i class="ti ti-lock" style="font-size:12px;margin-right:4px"></i>'
@@ -2957,12 +3027,19 @@ function saveWorkoutProgress() {
 }
 
 function defaultReps(ex, setIdx) {
-  if (ex && !ex.is_bodyweight && ex.progression_type !== 'stance' &&
-      progressionVariant(ex.state && ex.state.set3_weight) === 'rep_ladder') {
-    var progState = ex.state && ex.state.progression_state;
-    // Only set 3 in 'ready' state targets the ceiling (goal+5); all other sets use goal_reps
-    if (progState === 'ready' && setIdx === 2) {
-      return ex.goal_reps + 5;
+  if (ex && !ex.is_bodyweight && ex.progression_type !== 'stance') {
+    var st = ex.state;
+    var maxWeight = ex.max_weight != null ? Number(ex.max_weight) : null;
+    // Once all three sets sit at the equipment ceiling, evaluation is rep-ceiling based
+    // regardless of variant (see computeProgressionStep) — the set-3 pre-fill must match.
+    var allAtCap = maxWeight != null && st &&
+      st.set1_weight >= maxWeight && st.set2_weight >= maxWeight && st.set3_weight >= maxWeight;
+    if (allAtCap || progressionVariant(st && st.set3_weight) === 'rep_ladder') {
+      var progState = st && st.progression_state;
+      // Only set 3 in 'ready' state targets the ceiling (goal+5); all other sets use goal_reps
+      if (progState === 'ready' && setIdx === 2) {
+        return ex.goal_reps + 5;
+      }
     }
   }
   return ex ? ex.goal_reps : 0;
@@ -3630,7 +3707,7 @@ function exWeightRow(label, key, val, inc) {
     + '</div></div>';
 }
 
-var PROG_STATES = ['ready', 'catch_up_set2', 'catch_up_set1'];
+var PROG_STATES = ['ready', 'catch_up_set2', 'catch_up_set1', 'maxed'];
 
 function exCycleProgState() {
   var cur = EX_WEIGHT_DRAFT.progression_state;

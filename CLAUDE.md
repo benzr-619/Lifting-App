@@ -45,8 +45,8 @@ Supabase MCP is connected. Use it for migrations, schema inspection, and data qu
 
 ## Data model (`lift` schema)
 
-- **`exercises`** — static config: `gym_day` (1–3), `day_order`, `goal_reps`, increments, rest seconds, `form_cue`, flags (`is_bodyweight`, `is_optional`, `superset_group_id`, `is_superset_anchor`, `progression_hold_until_phase`).
-- **`exercise_state`** — per exercise: `set1/2/3_weight`, `progression_state` enum, `consecutive_failures`.
+- **`exercises`** — static config: `gym_day` (1–3), `day_order`, `goal_reps`, increments, rest seconds, `form_cue`, flags (`is_bodyweight`, `is_optional`, `superset_group_id`, `is_superset_anchor`, `progression_hold_until_phase`, `max_weight` — equipment ceiling, default 80, nullable = no cap, see `.claude/rules/progression.md` § Equipment ceiling — `is_active` — false excludes from workout generation but retains history, used for retiring an exercise without deleting/renaming it).
+- **`exercise_state`** — per exercise: `set1/2/3_weight`, `progression_state` enum (incl. terminal `'maxed'`), `consecutive_failures`.
 - **`sessions`** / **`session_sets`** — per gym visit / per set. `target_reps` snapshotted at log time. A set is `completed` (has `actual_reps`) or `skipped` (has `skip_reason`); CHECK constraint enforces the pairing.
 - **`cycle_plan`** — 56 rows (7 phases × 8 days): run miles, `target_cadence`, rehab exercise + timing, `is_lift_day`. Cadence targets (180 spm) are displayed in the UI on run-day cards but actual cadence is not logged — see Open Items.
 - **`plan_state`** (singleton) — rehab cursor: `current_phase`, `current_cycle_day` (1–8), `current_gym_day` (1–3), counters, `in_deload`, `deload_started_on`, `last_cycle_outcome` ('clean'/'neutral'/'dirty'); plus `rom_stage` (1–3: 45°/60°/Full ROM) and `rom_stage_started_on` — **ROM stage is an independent clock**, not tied to phase transitions.
