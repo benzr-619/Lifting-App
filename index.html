@@ -222,7 +222,8 @@ var APP = {
   calViewMonth:    null,
   calLogs:         [],
   calSessions:     [],
-  calUpcoming:     [],
+  calPlan:         [],   // all 56 cycle_plan rows, static; fetched once
+  calPhase:        1,    // phase shown in the schedule view; reset to current on open
   calLoading:      false,
   calSelectedDate: null,
 
@@ -586,30 +587,19 @@ async function loadCalendarData(year, month) {
   var startStr = year + '-' + pad(month + 1) + '-01';
   var endStr   = year + '-' + pad(month + 1) + '-' + pad(lastDay);
 
-  // Next 5 cursor days for the upcoming queue
-  var ps = APP.planState;
-  var currentDayNum = (ps.current_phase - 1) * 8 + ps.current_cycle_day;
-  var upcomingDayNums = [];
-  for (var i = 1; i <= 5; i++) {
-    upcomingDayNums.push(((currentDayNum - 1 + i) % 24) + 1);
-  }
+  var needPlan = !APP.calPlan || APP.calPlan.length === 0;
 
-  var [logsRes, sessionsRes, upcomingRes] = await Promise.all([
+  var [logsRes, sessionsRes, planRes] = await Promise.all([
     db.from('daily_log').select('*').gte('log_date', startStr).lte('log_date', endStr),
     db.from('sessions').select('id,gym_day,started_at,completed_at')
       .gte('completed_at', startStr + 'T00:00:00')
       .lte('completed_at', endStr + 'T23:59:59.999'),
-    db.from('cycle_plan').select('*').in('day_number', upcomingDayNums)
+    needPlan ? db.from('cycle_plan').select('*').order('day_number') : Promise.resolve(null)
   ]);
 
   APP.calLogs     = logsRes.data     || [];
   APP.calSessions = sessionsRes.data || [];
-
-  // Preserve insertion order matching upcomingDayNums
-  var allUpcoming = upcomingRes.data || [];
-  APP.calUpcoming = upcomingDayNums.map(function(dn) {
-    return allUpcoming.find(function(d) { return d.day_number === dn; });
-  }).filter(Boolean);
+  if (planRes && planRes.data) APP.calPlan = planRes.data;
 }
 
 async function createSession(gymDay) {
@@ -2393,7 +2383,7 @@ function rCalendar() {
   }
 
   // Upcoming queue
-  html += rCalUpcoming();
+  html += rCalSchedule();
 
   html += '</div>';
   return html;
@@ -2459,44 +2449,87 @@ function rCalDetailRow(icon, color, text) {
     + '<span style="font-size:13px;color:' + color + '">' + text + '</span></div>';
 }
 
-function rCalUpcoming() {
-  if (!APP.calUpcoming || APP.calUpcoming.length === 0) return '';
+function rCalSchedule() {
+  if (!APP.calPlan || APP.calPlan.length === 0) return '';
+
+  var ps = APP.planState;
+  var phase = APP.calPhase;
+  var isCurrent = ps && phase === ps.current_phase;
+  var arrow = function(dir, icon, disabled) {
+    return '<button ' + (disabled ? 'disabled ' : 'onclick="calPhaseNav(' + dir + ')" ')
+      + 'style="width:34px;height:34px;border-radius:50%;border:0.5px solid var(--color-border);background:transparent;display:flex;align-items:center;justify-content:center;color:var(--color-text);'
+      + (disabled ? 'opacity:0.3' : '') + '"><i class="ti ' + icon + '" style="font-size:16px"></i></button>';
+  };
 
   var html = '<div style="margin-top:24px">'
-    + '<p style="font-size:13px;font-weight:500;margin-bottom:2px">Coming up</p>'
-    + '<p style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:12px">Next sessions in planned order — dates depend on when you train</p>';
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+    + arrow(-1, 'ti-chevron-left', phase <= 1)
+    + '<div style="text-align:center"><span style="font-size:15px;font-weight:500">Phase ' + phase + '</span>'
+    + (isCurrent ? ' <span style="font-size:10px;font-weight:500;background:var(--color-bg-secondary);color:var(--color-text-info);border-radius:var(--radius-md);padding:2px 7px;margin-left:4px;vertical-align:middle">Current</span>' : '')
+    + '</div>'
+    + arrow(1, 'ti-chevron-right', phase >= 7)
+    + '</div>'
+    + '<p style="font-size:11px;color:var(--color-text-tertiary);text-align:center;margin-bottom:12px">Planned order — dates depend on when you train</p>';
 
-  var nextGymDay = APP.planState ? APP.planState.current_gym_day : 1;
-  APP.calUpcoming.forEach(function(day, i) {
+  var nextGymDay = ps ? ps.current_gym_day : 1;
+  for (var d = 1; d <= 8; d++) {
+    var dn = (phase - 1) * 8 + d;
+    var day = APP.calPlan.find(function(r) { return r.day_number === dn; });
+    if (!day) continue;
+
+    var isToday = isCurrent && d === ps.current_cycle_day;
+    var isPast  = isCurrent && d < ps.current_cycle_day;
+    var numberLift = isCurrent && d >= ps.current_cycle_day;
+
     var rows = [];
     if (day.is_lift_day) {
-      rows.push({ icon: 'ti-barbell',  col: 'var(--color-text-success)', text: 'Lift ' + nextGymDay });
-      nextGymDay = (nextGymDay % 3) + 1;
+      var liftLabel = 'Lift';
+      if (numberLift) {
+        liftLabel = 'Lift ' + nextGymDay;
+        nextGymDay = (nextGymDay % 3) + 1;
+      }
+      rows.push({ icon: 'ti-barbell', col: 'var(--color-text-success)', text: liftLabel });
     }
     if (day.run_miles) {
       var rt = 'Run ' + day.run_miles + ' mi';
       if (day.run_notes) rt += ' — ' + day.run_notes;
       rows.push({ icon: 'ti-run', col: 'var(--color-text-info)', text: rt });
+    } else {
+      rows.push({ icon: 'ti-moon', col: 'var(--color-text-tertiary)', text: 'Rest / no run', muted: true });
     }
-    if (day.rehab_timing) {
-      rows.push({ icon: 'ti-activity', col: 'var(--color-text-warning)',
-        text: 'Rehab (' + day.rehab_timing.replace(/_/g, ' ') + ')' });
+    if (day.rehab_exercise || day.rehab_timing) {
+      var rh = day.rehab_exercise || 'Rehab';
+      if (day.rehab_timing) rh += ' (' + day.rehab_timing.replace(/_/g, ' ') + ')';
+      rows.push({ icon: 'ti-activity', col: 'var(--color-text-warning)', text: rh });
     }
 
-    html += '<div style="display:flex;gap:10px;padding:10px 0;'
-      + (i < APP.calUpcoming.length - 1 ? 'border-bottom:0.5px solid var(--color-border)' : '') + '">'
-      + '<span style="font-size:11px;background:var(--color-bg-secondary);border-radius:var(--radius-md);padding:3px 8px;white-space:nowrap;color:var(--color-text-secondary);font-weight:500;flex-shrink:0;margin-top:1px">Day ' + day.day_number + '</span>'
+    html += '<div style="display:flex;gap:10px;padding:10px 8px;'
+      + (d < 8 ? 'border-bottom:0.5px solid var(--color-border);' : '')
+      + (isToday ? 'background:var(--color-bg-secondary);border-radius:var(--radius-md);' : '')
+      + (isPast ? 'opacity:0.45;' : '') + '">'
+      + '<div style="flex-shrink:0;margin-top:1px;text-align:center">'
+      + '<span style="display:block;font-size:11px;background:var(--color-bg-secondary);border-radius:var(--radius-md);padding:3px 8px;white-space:nowrap;color:var(--color-text-secondary);font-weight:500">D' + d + '</span>'
+      + (isToday ? '<span style="display:block;font-size:10px;font-weight:500;color:var(--color-text-info);margin-top:3px">Today</span>' : '')
+      + '</div>'
       + '<div style="flex:1">'
       + rows.map(function(r) {
           return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
             + '<i class="ti ' + r.icon + '" style="font-size:12px;color:' + r.col + ';flex-shrink:0"></i>'
-            + '<span style="font-size:13px">' + r.text + '</span></div>';
+            + '<span style="font-size:13px;' + (r.muted ? 'color:var(--color-text-tertiary)' : '') + '">' + r.text + '</span></div>';
         }).join('')
       + '</div></div>';
-  });
+  }
 
   html += '</div>';
   return html;
+}
+
+function calPhaseNav(dir) {
+  var p = APP.calPhase + dir;
+  if (p < 1) p = 1;
+  if (p > 7) p = 7;
+  APP.calPhase = p;
+  render();
 }
 
 // =============================================================
@@ -4199,6 +4232,7 @@ async function goCalendar() {
   APP.calViewYear     = now.getFullYear();
   APP.calViewMonth    = now.getMonth();
   APP.calSelectedDate = null;
+  APP.calPhase        = APP.planState ? APP.planState.current_phase : 1;
   APP.calLoading      = true;
   APP.screen = 'calendar';
   render();

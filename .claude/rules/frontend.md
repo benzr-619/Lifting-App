@@ -195,3 +195,10 @@ The following are purely presentational and carry no risk to the clinical state 
 - **Deload banner and readiness badge** visual treatment — their render *conditions* (`ps.in_deload`, `APP.readiness`) must stay; their visual design (color, icon, placement, copy) is free.
 - **Rest timer display** (the countdown digits, any progress arc, the Skip button placement) — can be fully redesigned as long as the `setInterval` arm/disarm in `render()` and the wake-lock logic at the bottom of `render()` remain intact.
 - **Rehab card layout** on the today screen and the rehab exercise detail screen — freely redesignable; the underlying `toggleRehab()` / `rehabMarkComplete()` call chain must remain.
+
+## Calendar phase schedule (`rCalSchedule`, `calPhaseNav`)
+Replaced the old "Coming up" upcoming-days queue under the month grid. Display only — no writes to `plan_state`, no cursor effects.
+- `loadCalendarData` loads all 56 `cycle_plan` rows once into `APP.calPlan` (static; refetched only if empty). `APP.calPhase` resets to `planState.current_phase` on every `goCalendar()`.
+- Header "‹ Phase N ›" (arrows clamped 1–7, `calPhaseNav`) over 8 rows, `day_number = (calPhase-1)*8 + 1..8`, badge shows phase-relative D1–D8. Rows: lift / run (miles + notes, or muted "Rest / no run") / rehab (exercise + timing).
+- In the current phase (tagged "Current"): `current_cycle_day` row highlighted "Today", earlier rows dimmed. "Lift N" numbering starts from `current_gym_day` at today's row onward only; past rows and other phases show plain "Lift" (gym day isn't predictable there).
+- **Removed bug:** the old queue computed upcoming day numbers with `% 24`, a leftover from the 3-phase plan that wrapped wrongly now that the plan has 56 days (7 phases). Don't reintroduce a modulo wrap.
